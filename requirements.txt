@@ -1,7 +1,7 @@
 fastapi
 uvicorn
 qdrant-client
-opencv-python
+opencv-python-headless
 transformers
 torch
 pillow

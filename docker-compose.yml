@@ -12,8 +12,7 @@ services:
       - QDRANT_HOST=qdrant_db
       - QDRANT_PORT=6333
     depends_on:
-      - qdrant_db:
-          condition: service_healthy
+      - qdrant_db
 
   # Qdrant Vector Database
   qdrant_db:
@@ -22,11 +21,6 @@ services:
       - "6333:6333"
     volumes:
       - qdrant_data:/qdrant/storage
-    healthcheck:
-      test: [ "CMD", "wget", "-qO-", "http://localhost:6333/health" ]
-      interval: 5s
-      timeout: 3s
-      retries: 5
 
 volumes:
   qdrant_data:

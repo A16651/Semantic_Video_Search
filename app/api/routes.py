@@ -56,12 +56,18 @@ async def search_video(
     model, processor, device = siglip.get_components()
     
     try:
-        inputs = processor(text=[query], return_tensors="pt", padding="max_length")
+        inputs = processor(text=[query], return_tensors="pt", padding="max_length", max_length=64, truncation=True)
         input_ids = inputs["input_ids"].to(device)
-        attention_mask = inputs["attention_mask"].to(device)
+        attention_mask = inputs.get("attention_mask")
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(device)
         
         with torch.no_grad():
-            text_features = model.get_text_features(input_ids=input_ids, attention_mask=attention_mask)
+            if attention_mask is not None:
+                text_features = model.get_text_features(input_ids=input_ids, attention_mask=attention_mask)
+            else:
+                text_features = model.get_text_features(input_ids=input_ids)
+
             text_features = F.normalize(text_features, p=2, dim=1)
             text_vector = text_features.cpu().numpy()[0].tolist()
             

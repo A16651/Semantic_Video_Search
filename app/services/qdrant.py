@@ -2,6 +2,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.http import models
 from app.core.config import settings
 import logging
+import uuid
 
 log = logging.getLogger(__name__)
 
@@ -40,7 +41,7 @@ class QdrantService:
         points = []
         for i, vec in enumerate(vectors):
             points.append(models.PointStruct(
-                id=None, # Qdrant will generate UUIDs if None, or we can use UUIDv4
+                id=str(uuid.uuid4()), 
                 vector=vec,
                 payload={
                     "user_id": user_id,
@@ -52,18 +53,12 @@ class QdrantService:
         # Batch upsert
         # Qdrant recommends batch size of 100-500. 
         # Since our inference batches are 32, we can just push them or aggregate.
-        import uuid
         
         start_idx = 0
         batch_limit = 100
         while start_idx < len(points):
             chunk = points[start_idx : start_idx + batch_limit]
             
-            # generating uuids
-            for pt in chunk:
-                if pt.id is None:
-                    pt.id = str(uuid.uuid4())
-                    
             self.client.upsert(
                 collection_name=self.collection_name,
                 points=chunk
@@ -73,9 +68,9 @@ class QdrantService:
         return len(points)
 
     def search(self, user_id: str, query_vector: list, limit: int = 5):
-        search_result = self.client.search(
+        search_result = self.client.query_points(
             collection_name=self.collection_name,
-            query_vector=query_vector,
+            query=query_vector,
             query_filter=models.Filter(
                 must=[
                     models.FieldCondition(
@@ -85,7 +80,7 @@ class QdrantService:
                 ]
             ),
             limit=limit
-        )
+        ).points
         return search_result
 
 qdrant_service = QdrantService()
