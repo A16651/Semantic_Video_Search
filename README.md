@@ -23,7 +23,7 @@ graph TD
     
     subgraph "Ingestion Pipeline (Producer-Consumer)"
         TaskQueue -->|Spawn| VLoad[Video Loader Thread]
-        VLoad -->|Stream Frames| MemBuf[Memory Buffer (Queue)]
+        VLoad -->|Stream Frames| MemBuf["Memory Buffer (Queue)"]
         MemBuf -->|Batch Fetch| Inference[SigLIP Inference Engine]
     end
     
@@ -33,6 +33,7 @@ graph TD
     User -->|Search Query| API
     API -->|Query Vector| Qdrant
     Qdrant -->|Ranked Results| API
+
 ```
 
 ### Key Engineering Highlights
