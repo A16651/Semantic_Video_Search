@@ -1,7 +1,10 @@
-torch
-torchvision
+fastapi
+uvicorn
+qdrant-client
+opencv-python
 transformers
+torch
 pillow
-faiss-gpu
+python-multipart
+pydantic-settings
 numpy
-tqdm
