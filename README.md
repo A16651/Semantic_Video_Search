@@ -12,6 +12,16 @@ A high-throughput, horizontally scalable video search engine powered by **Google
 
 ---
 
+## Performance Markers
+
+| Benchmark | Result | Environment |
+| :--- | :--- | :--- |
+| **Throughput** | ~21 Seconds for 25 mins of video | T4 GPU (Google Colab) |
+| **Inference Latency** | < 100ms per batch (32 frames) | RTX 3060 Mobile |
+| **Search Speed** | < 10ms (100k vectors) | Qdrant (HNSW Index) |
+
+---
+
 ## System Architecture
 
 This project has evolved from a simple script into a robust microservice architecture.
@@ -44,15 +54,7 @@ graph TD
 
 ---
 
-## Performance Markers
 
-| Benchmark | Result | Environment |
-| :--- | :--- | :--- |
-| **Throughput** | ~21 Seconds for 25 mins of video | T4 GPU (Google Colab) |
-| **Inference Latency** | < 100ms per batch (32 frames) | RTX 3060 Mobile |
-| **Search Speed** | < 10ms (100k vectors) | Qdrant (HNSW Index) |
-
----
 
 ## Tech Stack
 
@@ -98,7 +100,6 @@ Go to `http://localhost:8000/docs` to test the endpoints interactively:
 
 - [x] **v1.0**: Core Script (OpenCV + FAISS)
 - [x] **v2.0**: FastAPI Backend + Producer-Consumer Pipeline + Qdrant
-- [ ] **v2.1**: Kubernetes Deployment Manifests (Helm Charts)
 - [ ] **v3.0**: Distributed Worker Nodes (Celery/Redis) for horizontal scaling
 - [ ] **Frontend**: Dashboard for video managment
 
