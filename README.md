@@ -1,4 +1,4 @@
-# 🔍 Semantic Video Search Engine [Enterprise Grade]
+# 🔍 Semantic Video Search Engine 
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue?style=flat&logo=python)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.95%2B-009688?style=flat&logo=fastapi)
