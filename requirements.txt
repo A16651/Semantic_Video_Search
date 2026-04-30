@@ -1,10 +1,25 @@
+# ── Web framework ───────────────────────────────────────────────────────────
 fastapi
-uvicorn
+uvicorn[standard]
+
+# ── Vector database client ──────────────────────────────────────────────────
 qdrant-client
-opencv-python-headless
+
+# ── ML / Embeddings ─────────────────────────────────────────────────────────
 transformers
 torch
 pillow
-python-multipart
-pydantic-settings
 numpy
+
+# ── ONNX export + INT8 quantization (Phase 1) ───────────────────────────────
+optimum[onnxruntime]
+onnxruntime            # CPU runtime (use onnxruntime-gpu for CUDA devices)
+
+# ── Scene detection (Phase 2: Content-Aware frame filtering) ────────────────
+scenedetect[opencv]    # Installs scenedetect + opencv-python-headless
+
+# ── Utilities ───────────────────────────────────────────────────────────────
+python-multipart       # FastAPI file uploads
+pydantic-settings      # Settings management
+requests               # External requests for CLI client
+

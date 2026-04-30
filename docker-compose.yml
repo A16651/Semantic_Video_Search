@@ -1,26 +1,63 @@
 version: '3.8'
 
 services:
-  # Your FastAPI Backend
+  # ─────────────────────────────────────────────
+  # FastAPI Backend
+  # ─────────────────────────────────────────────
   api:
     build: .
+    container_name: siglip_engine
     ports:
       - "8000:8000"
     volumes:
-      - .:/app # Hot reload for development
+      - .:/app # Hot-reload for development
+      - model_cache:/root/.cache/huggingface # Persist downloaded models
     environment:
       - QDRANT_HOST=qdrant_db
       - QDRANT_PORT=6333
+      - QDRANT_COLLECTION=video_embeddings
     depends_on:
-      - qdrant_db
+      qdrant_db:
+        condition: service_healthy
 
+  # ─────────────────────────────────────────────
   # Qdrant Vector Database
+  # Optimised for low-RAM devices (4-8 GB):
+  #   • mmap_threshold_kb=10000  → segments >10 MB are memory-mapped from
+  #     disk instead of kept in RAM, preventing OOM on small devices.
+  #   • on_disk_payload=true     → payload data is stored on disk, not RAM.
+  # ─────────────────────────────────────────────
   qdrant_db:
     image: qdrant/qdrant:latest
     ports:
       - "6333:6333"
+      - "6334:6334" # gRPC port (optional but useful)
     volumes:
       - qdrant_data:/qdrant/storage
+    environment:
+      # ── Memory-mapped storage ──────────────────────────────────────────
+      # Segments whose on-disk size exceeds this threshold (in KB) will be
+      # accessed via mmap instead of being fully loaded into RAM.
+      # 10 000 KB = ~10 MB  →  safe for 4 GB devices.
+      - QDRANT__STORAGE__MMAP_THRESHOLD_KB=10000
+
+      # Store payload (metadata JSON) on disk rather than in RAM.
+      - QDRANT__STORAGE__ON_DISK_PAYLOAD=true
+
+      # ── Performance tuning ────────────────────────────────────────────
+      # Limit the number of async indexing threads to avoid saturating a
+      # low-core CPU on budget devices.
+      - QDRANT__STORAGE__ASYNC_SCORER=false
+
+      # ── Telemetry opt-out ─────────────────────────────────────────────
+      - QDRANT__TELEMETRY_DISABLED=true
+    healthcheck:
+      test: [ "CMD-SHELL", "wget -qO- http://localhost:6333/healthz || exit 1" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
 volumes:
   qdrant_data:
+  model_cache:
