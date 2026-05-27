@@ -1,30 +1,96 @@
 import time
 import os
+import glob
+import requests
 from tkinter import filedialog
-from Backend.Core.video_processor import bulk_extract_frames
-from Backend.Core.SigLip_engine import process_and_index, remove_video_vectors
-from Backend.Core.search_pipeline import search_with_temporal_filter 
-from Backend.Core.config import *
+import tkinter as tk
+import logging
 
 log = logging.getLogger(__name__)
 
+API_URL = "http://localhost:8000/api/v1"
+USER_ID = "default_user"
 
 def run_search(query):
     """
-    Step 3: Perform search.
+    Step 3: Perform search via FastAPI backend.
     """
-    log.info(f"Searching for: '{query}'")
+    print(f"Searching for: '{query}'")
     t1 = time.perf_counter()
-    results = search_with_temporal_filter(query, k=5)
+    
+    try:
+        response = requests.post(
+            f"{API_URL}/search",
+            data={"query": query, "user_id": USER_ID, "limit": 5}
+        )
+        response.raise_for_status()
+        results = response.json()
+    except Exception as e:
+        print(f"Search failed: {e}")
+        return
+
     t2 = time.perf_counter()
-    log.debug(f"Time for succesfull Search = {t2-t1}\n")
-    print(f"\n--- Search Results --- (for {query=})")
+    print(f"Time for HTML Search = {t2-t1:.4f}s\n")
+    print(f"\n--- Search Results --- (for query='{query}')")
+    if not results:
+        print("No results found.")
     for idx, res in enumerate(results):
-        print(f"{idx+1}. Time: {res['timestamp']}s | Score: {res['score']:.4f} | File: {res['filename']}")
+        print(
+            f"{idx+1}. [{res.get('filename', 'N/A')}] "
+            f"Time: {res.get('timestamp', 0):.2f}s | "
+            f"Frame: {res.get('frame_idx', 'N/A')} | "
+            f"Score: {res.get('score', 0):.4f} | "
+            f"Video ID: {res.get('video_id', 'N/A')}"
+        )
     print("----------------------\n")
 
+
+def process_video(vid_path):
+    import datetime
+    print(f"Uploading {os.path.basename(vid_path)}...")
+    try:
+        t1 = datetime.datetime.now()   # FIX: was datetime.datetime.time (class ref, not a call)
+        with open(vid_path, 'rb') as f:
+            response = requests.post(
+                f"{API_URL}/upload",
+                data={"user_id": USER_ID},
+                files={"file": (os.path.basename(vid_path), f, "video/mp4")}
+            )
+        response.raise_for_status()
+        task_info = response.json()
+        task_id = task_info.get("task_id")
+        print(f"Started processing. Task ID: {task_id}")
+        
+        while True:
+            time.sleep(2)
+            try:
+                status_res = requests.get(f"{API_URL}/status/{task_id}")
+                if status_res.status_code == 200:
+                    status = status_res.json().get("status")
+                    if status == "completed":
+                        print(f"[{os.path.basename(vid_path)}] Processing completed!")
+                        break
+                    elif status == "failed":
+                        print(f"[{os.path.basename(vid_path)}] Processing failed: {status_res.json().get('error')}")
+                        break
+                    else:
+                        print(f"[{os.path.basename(vid_path)}] Status: {status}...")
+                else:
+                    print(f"Error checking status: {status_res.status_code}")
+                    break
+            except Exception as e:
+                print(f"Status check failed: {e}")
+                break
+        t2 = datetime.datetime.now()   # FIX: was datetime.datetime.time (class ref, not a call)
+        print(f"\n\nTotal time required : {(t2-t1).total_seconds():.2f}s\n")
+    except Exception as e:
+        print(f"Failed to upload {vid_path}: {e}")
+
 def add_videos_flow():
-    
+    # Hide the main tkinter window
+    root = tk.Tk()
+    root.withdraw()
+
     choice = input("Select Source - Do you want to add a whole FOLDER? (y/n)\n : ")
     
     video_files = []
@@ -33,60 +99,33 @@ def add_videos_flow():
         folder = filedialog.askdirectory(title="Select Video Folder")
         if not folder:
             return
-        import glob
         video_files = glob.glob(os.path.join(folder, "*.mp4"))
         if not video_files:
-            print("Error", "No .mp4 files found in that folder.")
+            print("Error: No .mp4 files found in that folder.")
             return
     elif choice.lower() == 'n' : 
         files = filedialog.askopenfilenames(title="Select Video Files", filetypes=[("MP4 Videos", "*.mp4")])
         if not files: return
         video_files = list(files)
     else :
-        print("invalod input")
+        print("Invalid input")
         return
 
-    typs = ['fast', 'accurate', '1fps']
-    method = input("\nExtraction Method : \n1.fast \n2.accurate \n3.1fps \n : ")
-    try :
-        method = typs[int(method)-1]
-        
-    except Exception :
-        print("Invalid Chice")
-        return
-        
+    print(f"Selected {len(video_files)} videos. Uploading to backend...")
     
-    print(f"Selected {len(video_files)} videos. Method: {method}. Processing...")
+    for vid_path in video_files:
+        process_video(vid_path)
     
-    success = bulk_extract_frames(
-        output_folder=DATA_FOLDER, 
-        use_gpu=True,
-        method=method,
-        video_files_list=video_files
-    )
-    
-    if not success:
-        print("Error during frame extraction.")
-        return
-
-    print("Indexing...")
-    process_and_index(DATA_FOLDER)
+    print("Finished uploading videos.")
     return
     
 
 def remove_videos_flow():
-    files = filedialog.askopenfilenames(title="Select Videos to Remove", filetypes=[("MP4 Videos", "*.mp4")])
-    if not files: 
-        return
-    
-    for vid in files:
-        print(f"Removing {vid}...")
-        remove_video_vectors(vid)
-        
-    print("Success", "Selected videos removed from index.")
+    print("Warning: Remove videos functionality is not yet exposed by the backend API.")
 
 def main():
-    print("AI Video Search Engine Started.")
+    print("AI Video Search Engine Client Started.")
+    print(f"Ensure the API is running at {API_URL}")
 
     while True:        
         choice = input("\n1.Search\n2.Add Videos\n3.Remove videos\n4.Exit\n : ")

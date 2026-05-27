@@ -16,9 +16,9 @@ A high-throughput, horizontally scalable video search engine powered by **Google
 
 | Benchmark | Result | Environment |
 | :--- | :--- | :--- |
-| **Throughput** | ~21 Seconds for 25 mins of video | T4 GPU (Google Colab) |
-| **Inference Latency** | < 100ms per batch (32 frames) | RTX 3060 Mobile |
-| **Search Speed** | < 10ms (100k vectors) | Qdrant (HNSW Index) |
+| **Throughput** | ~21 Seconds for 100 mins of video | T4 GPU (Google Colab) |
+| **Inference Latency** | < 500ms per batch (32 frames) | Google Colab  |
+| **Search Speed** | < 300ms  | Qdrant (HNSW Index) |
 
 ---
 
@@ -47,10 +47,12 @@ graph TD
 ```
 
 ### Key Engineering Highlights
-*   **Producer-Consumer Pipeline**: Decoupled video decoding (I/O bound) from model inference using threaded queues. This ensures the GPU is never starved of data, resulting in **40%+** faster processing.
-*   **Streaming Inference**: Frames are processed in-memory without intermediate disk writes, reducing latency and SSD wear.
-*   **Scalable Vector Search**: Migrated from flat files to **Qdrant** for production-ready, filtered vector retrieval (supports millions of vectors).
-*   **Asynchronous API**: Built with **FastAPI** to handle concurrent requests and long-running video processing tasks non-blockingly.
+
+* **Multi Threaded Pipeline :** Decoupled CPU-bound video decoding from GPU bound model inference using thread safe memory queues. This design mitigates GPU starvation
+
+* **Zero Copy In Memory Streaming :** Extracted video frames are streamed directly through RAM buffers into the inference batch engine without intermediate local disk writes, completely eliminating disk I/O bottlenecks and reducing hardware wear.
+
+* **Non Blocking Asynchronous API :** Implemented utilizing FastAPI and Python's asyncio to effortlessly manage high-concurrency connections during long-running background extraction worker processes. ( branch not yet PRed )
 
 ---
 
@@ -58,11 +60,11 @@ graph TD
 
 ## Tech Stack
 
-*   **Core Backend**: Python 3.10, FastAPI, Pydantic
-*   **AI / ML**: PyTorch, Transformers (Hugging Face), **Google SigLIP** (ViT-B-16)
-*   **Computer Vision**: OpenCV (Smart Frame Extraction)
-*   **Database**: Qdrant (Vector Store), SQLite/Postgres (Metadata)
-*   **Infrastructure**: Docker (planned), AsyncIO
+*   **Core Backend**: Python 3.10, FastAPI
+*   **AI / ML**: PyTorch, Transformers , **Google SigLIP** 
+*   **Computer Vision**: OpenCV , ffmpeg
+*   **Database**: Qdrant (Vector Store)
+*   **Infrastructure**: Docker
 
 ---
 
@@ -98,9 +100,10 @@ Go to `http://localhost:8000/docs` to test the endpoints interactively:
 
 ## Roadmap & Future Improvements
 
-- [x] **v1.0**: Core Script (OpenCV + FAISS)
-- [x] **v2.0**: FastAPI Backend + Producer-Consumer Pipeline + Qdrant
-- [ ] **v3.0**: Distributed Worker Nodes (Celery/Redis) for horizontal scaling
+- [x] **v1.0**: Core Script (SigLip + Qdrant )
+- [x] **v2.0**: FastAPI Backend + Producer-Consumer Pipeline + Qdrant (about to be released)
+- [ ] **v3.0**: MoonDream, support for android Devices.
+- [ ] **v4.0**: Distributed Worker Nodes (Celery/Redis) for horizontal scaling
 - [ ] **Frontend**: Dashboard for video managment
 
 ---
