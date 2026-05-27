@@ -12,9 +12,10 @@ import logging
 import os
 import shutil
 import uuid
+from typing import List
 
 import numpy as np
-from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Query, UploadFile
 
 from app.core.config import settings
 from app.engine.models import SigLipEngine
@@ -25,7 +26,6 @@ log = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# Ensure temp upload folder exists
 UPLOAD_DIR = "temp_uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -81,21 +81,26 @@ async def debug_collection():
     except Exception as exc:
         qdrant_info = {"error": str(exc)}
 
-    # ── ONNX text-embedding dimension check ───────────────────────────────────
+    # ── ONNX model info ───────────────────────────────────────────────────────
     model_info = {"status": "not_checked"}
     try:
         siglip = SigLipEngine()
-        _, processor, _ = siglip.get_components()
         import numpy as _np
-        dummy_ids = _np.zeros((1, 64), dtype=_np.int64)
-        dummy_mask = _np.ones((1, 64), dtype=_np.int64)
+        dummy_ids  = _np.zeros((1, 64), dtype=_np.int64)
+        dummy_mask = _np.ones((1, 64),  dtype=_np.int64)
         emb = siglip.get_text_features(dummy_ids, dummy_mask)
         model_info = {
             "status": "ok",
-            "text_embedding_dim": emb.shape[-1],
-            "onnx_inputs": sorted(siglip._input_names),
+            "mode": "split" if siglip.is_split_mode else "combined",
+            "text_embedding_dim": int(emb.shape[-1]),
+            "onnx_inputs":  sorted(siglip._input_names),
             "onnx_outputs": siglip._output_names,
         }
+        if siglip.is_split_mode:
+            model_info["vision_inputs"]  = sorted(siglip._vision_inputs)
+            model_info["vision_outputs"] = siglip._vision_outputs
+            model_info["text_inputs"]    = sorted(siglip._text_inputs)
+            model_info["text_outputs"]   = siglip._text_outputs
     except Exception as exc:
         model_info = {"status": "error", "detail": str(exc)}
 
@@ -107,24 +112,38 @@ async def debug_collection():
 # ---------------------------------------------------------------------------
 
 @router.post("/upload")
-async def upload_video(
+async def upload_videos(
     background_tasks: BackgroundTasks,
     user_id: str = Form(...),
-    file: UploadFile = File(...),
+    files: List[UploadFile] = File(...),
 ):
-    file_extension = file.filename.split(".")[-1]
-    task_id = str(uuid.uuid4())
-    temp_file_path = os.path.join(UPLOAD_DIR, f"{task_id}.{file_extension}")
+    """
+    Accept one OR more video files and start a background processing task
+    for each.  All tasks run concurrently — useful for batch ingestion.
 
-    with open(temp_file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    Returns a list of task objects so the client can poll each independently.
+    """
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided.")
 
-    tasks_db[task_id] = {"status": "queued"}
-    background_tasks.add_task(
-        process_video_background, task_id, temp_file_path, user_id
-    )
+    results = []
+    for file in files:
+        # Sanitise extension; default to mp4 if filename has no dot
+        raw_name = file.filename or "upload"
+        ext = raw_name.rsplit(".", 1)[-1] if "." in raw_name else "mp4"
+        task_id = str(uuid.uuid4())
+        temp_path = os.path.join(UPLOAD_DIR, f"{task_id}.{ext}")
 
-    return {"task_id": task_id, "status": "queued"}
+        with open(temp_path, "wb") as buf:
+            shutil.copyfileobj(file.file, buf)
+
+        tasks_db[task_id] = {"status": "queued", "filename": raw_name}
+        background_tasks.add_task(process_video_background, task_id, temp_path, user_id)
+
+        results.append({"task_id": task_id, "filename": raw_name, "status": "queued"})
+        log.info("Queued task %s for file '%s' (user=%s)", task_id, raw_name, user_id)
+
+    return {"tasks": results, "count": len(results)}
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +191,7 @@ async def search_video(
     try:
         inputs = processor(
             text=[query],
-            return_tensors="np",          # numpy, not torch
+            return_tensors="np",         
             padding="max_length",
             max_length=64,
             truncation=True,
@@ -224,14 +243,97 @@ async def search_video(
             query, user_id,
         )
 
-    # ── 5. Format and return ─────────────────────────────────────────────────
+    # ── 5. Format and return ───────────────────────────────────────────────────────
     return [
         {
-            "score": res.score,
+            "score":     res.score,
             "timestamp": res.payload.get("timestamp"),
             "frame_idx": res.payload.get("frame_idx"),
-            "video_id": res.payload.get("video_id"),
-            "filename": res.payload.get("filename", ""),
+            "video_id":  res.payload.get("video_id"),
+            "filename":  res.payload.get("filename", ""),
         }
         for res in results
     ]
+
+
+# ---------------------------------------------------------------------------
+# Video management
+# ---------------------------------------------------------------------------
+
+@router.get("/videos")
+async def list_videos(user_id: str = Query(..., description="User whose video library to list")):
+    """
+    List all videos indexed for *user_id*, with frame counts and video IDs.
+    Use the returned video_id values with DELETE /video/{video_id} to remove videos.
+    """
+    try:
+        videos = qdrant_service.list_user_videos(user_id)
+    except Exception as exc:
+        log.error("list_user_videos failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Could not list videos: {exc}")
+
+    return {"user_id": user_id, "videos": videos, "count": len(videos)}
+
+
+@router.delete("/video/{video_id}")
+async def delete_video(
+    video_id: str,
+    user_id: str = Query(..., description="Owner of the video — only their data is touched"),
+):
+    """
+    Delete all embedding vectors for *video_id* that belong to *user_id*.
+
+    Safe to call on a video_id that no longer exists (returns frames_removed=0).
+    Does NOT delete the original video file — only the search index entries.
+    """
+    try:
+        result = qdrant_service.delete_video(user_id=user_id, video_id=video_id)
+    except Exception as exc:
+        log.error("delete_video failed for video_id='%s': %s", video_id, exc, exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Delete failed: {exc}")
+
+    log.info("Deleted video_id='%s' for user='%s'.", video_id, user_id)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Admin endpoints
+# ---------------------------------------------------------------------------
+# NOTE: These endpoints have no authentication in the prototype.
+#       Before moving to production, add an API key or JWT middleware.
+# ---------------------------------------------------------------------------
+
+@router.get("/admin/users")
+async def admin_list_users():
+    """
+    Admin: list every user_id in the collection with their video count and
+    total indexed frames.  Requires a full collection scan — fast for prototype
+    scale, consider a metadata sidecar for very large deployments.
+    """
+    try:
+        users = qdrant_service.list_users()
+    except Exception as exc:
+        log.error("admin_list_users failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Could not list users: {exc}")
+
+    return {"users": users, "total_users": len(users)}
+
+
+@router.delete("/admin/user/{user_id}")
+async def admin_delete_user(user_id: str):
+    """
+    Admin: permanently delete ALL data for *user_id* — every video, every
+    embedding frame.  This operation is IRREVERSIBLE.
+
+    Returns a summary: how many videos and frames were removed.
+    """
+    if not user_id or not user_id.strip():
+        raise HTTPException(status_code=400, detail="user_id must not be empty.")
+
+    try:
+        result = qdrant_service.delete_user(user_id=user_id)
+    except Exception as exc:
+        log.error("admin_delete_user failed for user='%s': %s", user_id, exc, exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Delete failed: {exc}")
+
+    return result

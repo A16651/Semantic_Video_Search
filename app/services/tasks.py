@@ -14,7 +14,11 @@ tasks_db: dict = {}
 
 
 def update_task_status(task_id: str, status: str, error: str | None = None) -> None:
-    tasks_db[task_id] = {"status": status, "error": error}
+    # Merge into existing entry so fields set at queue time (e.g. filename) are preserved
+    entry = tasks_db.get(task_id, {})
+    entry["status"] = status
+    entry["error"]  = error
+    tasks_db[task_id] = entry
     log.info("Task %s → %s", task_id, status)
 
 

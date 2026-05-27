@@ -33,6 +33,13 @@ class Settings(BaseSettings):
     # Set to "model_quantized.onnx" to use INT8; "model.onnx" for FP32.
     ONNX_MODEL_FILE: str = "model_quantized.onnx"
 
+    # ── Split model paths (Phase 5) ───────────────────────────────────────
+    # Generated once by running:  python tools/export_split_models.py
+    # If BOTH files exist the engine loads them instead of the combined model,
+    # cutting inference time ~50% per call (each encoder runs independently).
+    ONNX_VISION_MODEL_FILE: str = "vision_encoder_int8.onnx"
+    ONNX_TEXT_MODEL_FILE:   str = "text_encoder_int8.onnx"
+
     # ── ONNX Runtime performance flags ───────────────────────────────────
     # Number of threads for intra-op parallelism (0 = ORT auto-detect).
     # On mobile / mid-range CPUs, 2-4 is usually optimal.  Keep 0 for auto.
