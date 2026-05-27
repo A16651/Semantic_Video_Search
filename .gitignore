@@ -49,3 +49,7 @@ Cloud_test.ipynb
 # OS
 .DS_Store
 Thumbs.db
+project_state_summary.md
+test_qdrant_data.py
+test_open.py
+test_inference.py

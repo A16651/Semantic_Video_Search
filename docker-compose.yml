@@ -6,57 +6,76 @@ services:
   # ─────────────────────────────────────────────
   api:
     build: .
-    container_name: siglip_engine
+    image: ai_gallery
+    container_name: ai_engine
     ports:
       - "8000:8000"
     volumes:
-      - .:/app # Hot-reload for development
+      - .:/app                              # Hot-reload for development
       - model_cache:/root/.cache/huggingface # Persist downloaded models
     environment:
       - QDRANT_HOST=qdrant_db
       - QDRANT_PORT=6333
       - QDRANT_COLLECTION=video_embeddings
+      # Tell qdrant.py to use HTTP server mode (not embedded local)
+      - QDRANT_USE_SERVER=true
     depends_on:
       qdrant_db:
         condition: service_healthy
 
   # ─────────────────────────────────────────────
   # Qdrant Vector Database
-  # Optimised for low-RAM devices (4-8 GB):
-  #   • mmap_threshold_kb=10000  → segments >10 MB are memory-mapped from
-  #     disk instead of kept in RAM, preventing OOM on small devices.
-  #   • on_disk_payload=true     → payload data is stored on disk, not RAM.
+  #
+  # Speed-first tuning (speed > RAM):
+  #   • async_scorer=true     → parallel scoring threads (FAST, default ON)
+  #   • mmap_threshold_kb     → only raw FP32 vecs are on disk; INT8 index
+  #                             and HNSW graph are kept in RAM by the client
+  #                             config (always_ram=True / on_disk=False).
+  #   • max_search_threads=0  → let Qdrant use all CPU cores for search
   # ─────────────────────────────────────────────
   qdrant_db:
     image: qdrant/qdrant:latest
     ports:
-      - "6333:6333"
-      - "6334:6334" # gRPC port (optional but useful)
+      - "6333:6333"   # REST API
+      - "6334:6334"   # gRPC (faster bulk ops; enable prefer_grpc in client)
     volumes:
       - qdrant_data:/qdrant/storage
     environment:
-      # ── Memory-mapped storage ──────────────────────────────────────────
-      # Segments whose on-disk size exceeds this threshold (in KB) will be
-      # accessed via mmap instead of being fully loaded into RAM.
-      # 10 000 KB = ~10 MB  →  safe for 4 GB devices.
-      - QDRANT__STORAGE__MMAP_THRESHOLD_KB=10000
+      # ── Segment storage ────────────────────────────────────────────────
+      # Segments whose on-disk raw-vector size exceeds this threshold are
+      # mmap-ed from disk.  50 MB is generous — only raw FP32 vecs hit disk;
+      # the INT8 index is kept in RAM via always_ram=True in the collection.
+      - QDRANT__STORAGE__MMAP_THRESHOLD_KB=51200
 
-      # Store payload (metadata JSON) on disk rather than in RAM.
+      # ── Async parallel scorer (CRITICAL for speed) ────────────────────
+      # false was the old value — it serialised ALL scoring. Flip to true.
+      # This allows Qdrant to score candidates on multiple threads.
+      - QDRANT__STORAGE__ASYNC_SCORER=true
+
+      # ── Search thread pool ─────────────────────────────────────────────
+      # 0 = use all available CPU cores.  Caps at the number of vCPUs.
+      - QDRANT__STORAGE__MAX_SEARCH_THREADS=0
+
+      # ── Optimizer (indexing) ───────────────────────────────────────────
+      # How many segments to merge concurrently during background optimisation.
+      - QDRANT__STORAGE__OPTIMIZERS__MAX_OPTIMIZATION_THREADS=2
+
+      # ── WAL (Write-Ahead Log) ──────────────────────────────────────────
+      # Larger WAL capacity = fewer flushes = faster ingestion.
+      - QDRANT__STORAGE__WAL__WAL_CAPACITY_MB=64
+
+      # ── Payload storage ────────────────────────────────────────────────
+      # Keep payload on disk (it is tiny and rarely read at search time).
       - QDRANT__STORAGE__ON_DISK_PAYLOAD=true
 
-      # ── Performance tuning ────────────────────────────────────────────
-      # Limit the number of async indexing threads to avoid saturating a
-      # low-core CPU on budget devices.
-      - QDRANT__STORAGE__ASYNC_SCORER=false
-
-      # ── Telemetry opt-out ─────────────────────────────────────────────
+      # ── Telemetry ──────────────────────────────────────────────────────
       - QDRANT__TELEMETRY_DISABLED=true
     healthcheck:
-      test: [ "CMD-SHELL", "wget -qO- http://localhost:6333/healthz || exit 1" ]
+      test: ["CMD-SHELL", "wget -qO- http://localhost:6333/healthz || exit 1"]
       interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
 
 volumes:
   qdrant_data:

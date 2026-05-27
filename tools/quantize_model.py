@@ -106,59 +106,30 @@ def export_to_onnx(model_name: str, output_dir: str) -> str:
 
 
 def quantize_model(onnx_dir: str, quantization_mode: str) -> str:
-    """
-    Apply INT8 post-training static quantization with ORTOptimizer.
-    Returns path to the quantized .onnx file.
-    """
-    from optimum.onnxruntime import ORTOptimizer
-    from optimum.onnxruntime.configuration import (
-        AutoQuantizationConfig,
-        OptimizationConfig,
+    import onnx
+    from onnxruntime.quantization import quantize_dynamic, QuantType
+
+    log.info("Applying INT8 quantization (ONNX Runtime dynamic)…")
+
+    # Find ONNX file
+    onnx_path = None
+    for f in os.listdir(onnx_dir):
+        if f.endswith(".onnx"):
+            onnx_path = os.path.join(onnx_dir, f)
+            break
+
+    if not onnx_path:
+        raise FileNotFoundError("No ONNX model found to quantize.")
+
+    quantized_path = os.path.join(onnx_dir, "model_quantized.onnx")
+
+    # Dynamic quantization (safe + no calibration needed)
+    quantize_dynamic(
+        model_input=onnx_path,
+        model_output=quantized_path,
+        weight_type=QuantType.QInt8
     )
 
-    log.info("Applying INT8 quantization (mode=%s)…", quantization_mode)
-
-    optimizer = ORTOptimizer.from_pretrained(onnx_dir)
-
-    # ------------------------------------------------------------------
-    # Optimization pass (graph-level): eliminate redundant nodes, fold
-    # constants, etc.  Level 99 = all optimizations.
-    # ------------------------------------------------------------------
-    opt_config = OptimizationConfig(
-        optimization_level=99,
-        optimize_for_gpu=False,
-        fp16=False,
-    )
-    optimizer.optimize(
-        save_dir=onnx_dir,
-        optimization_config=opt_config,
-    )
-    log.info("Graph optimization complete.")
-
-    # ------------------------------------------------------------------
-    # Quantization pass: FP32 → INT8 using preset for target hardware.
-    # ------------------------------------------------------------------
-    if quantization_mode == "arm64":
-        qconfig = AutoQuantizationConfig.arm64(is_static=False, per_channel=False)
-    else:  # avx2 covers AVX2 and SSE4 x86 paths (good all-rounder)
-        qconfig = AutoQuantizationConfig.avx2(is_static=False, per_channel=False)
-
-    quantized_model_dir = os.path.join(onnx_dir, "quantized")
-    os.makedirs(quantized_model_dir, exist_ok=True)
-
-    optimizer.quantize(
-        save_dir=quantized_model_dir,
-        quantization_config=qconfig,
-    )
-
-    # Locate the produced quantized file
-    candidates = [f for f in os.listdir(quantized_model_dir) if f.endswith(".onnx")]
-    if not candidates:
-        raise FileNotFoundError(
-            f"Quantization completed but no .onnx found in {quantized_model_dir}"
-        )
-
-    quantized_path = os.path.join(quantized_model_dir, candidates[0])
     log.info("INT8 quantized model saved → %s", quantized_path)
     return quantized_path
 

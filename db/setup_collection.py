@@ -92,37 +92,35 @@ def setup_collection(client: QdrantClient, recreate: bool = False) -> None:
         vectors_config=qmodels.VectorParams(
             size=EMBEDDING_DIM,
             distance=qmodels.Distance.COSINE,
-            # Store raw vectors on disk (read via mmap); keeps RAM usage low.
+            # Raw FP32 vectors on disk — only read during rescore (few reads).
             on_disk=True,
         ),
 
         # ── Scalar Quantization (INT8) ─────────────────────────────────
-        # Converts stored FP32 vectors to INT8 at index time.
-        # Memory saving: ~4× (768 * 4 bytes → 768 * 1 byte per vector).
-        # quantile=0.99 calibrates the [min, max] range from the 99th
-        # percentile of values, preventing extreme outliers from
-        # squashing the useful range.
-        # always_ram=False → quantized vectors live on disk (mmap).
+        # Converts FP32 → INT8: 4× smaller (768 B vs 3 072 B per vector).
+        # always_ram=True: INT8 index stays HOT in RAM → every ANN search
+        # is a pure-memory operation → fastest possible query latency.
+        # quantile=0.99 calibrates the [min, max] range on the top 99th
+        # percentile, preventing outliers from squashing precision.
         quantization_config=qmodels.ScalarQuantization(
             scalar=qmodels.ScalarQuantizationConfig(
                 type=qmodels.ScalarType.INT8,
                 quantile=0.99,
-                always_ram=False,
+                always_ram=True,   # ← KEY: INT8 index in RAM for speed
             )
         ),
 
-        # ── HNSW index parameters ──────────────────────────────────────
-        # m=16: number of bi-directional edges per node.  Lower = less
-        # RAM/disk, slightly lower recall.  Good for mid-range devices.
-        # ef_construct=100: search width during graph construction.
+        # ── HNSW index ─────────────────────────────────────────────────
+        # m=16: 16 bi-directional edges per node — good recall/RAM tradeoff.
+        # ef_construct=200: higher quality graph — better recall at query time.
+        # on_disk defaults to False → graph stays in RAM → fast traversal.
         hnsw_config=qmodels.HnswConfigDiff(
             m=16,
-            ef_construct=100,
-            # Index is also stored on disk to avoid RAM pressure.
-            on_disk=True,
+            ef_construct=200,
+            # on_disk=False (default) — keep HNSW graph in RAM
         ),
 
-        # ── Payload (metadata) storage ─────────────────────────────────
+        # Payload on disk — read only when returning final results (tiny reads).
         on_disk_payload=True,
     )
 

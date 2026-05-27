@@ -35,13 +35,21 @@ def run_search(query):
     if not results:
         print("No results found.")
     for idx, res in enumerate(results):
-        print(f"{idx+1}. Time: {res.get('timestamp', 0):.2f}s | Score: {res.get('score', 0):.4f} | Video ID: {res.get('video_id', 'N/A')}")
+        print(
+            f"{idx+1}. [{res.get('filename', 'N/A')}] "
+            f"Time: {res.get('timestamp', 0):.2f}s | "
+            f"Frame: {res.get('frame_idx', 'N/A')} | "
+            f"Score: {res.get('score', 0):.4f} | "
+            f"Video ID: {res.get('video_id', 'N/A')}"
+        )
     print("----------------------\n")
 
 
 def process_video(vid_path):
+    import datetime
     print(f"Uploading {os.path.basename(vid_path)}...")
     try:
+        t1 = datetime.datetime.now()   # FIX: was datetime.datetime.time (class ref, not a call)
         with open(vid_path, 'rb') as f:
             response = requests.post(
                 f"{API_URL}/upload",
@@ -73,7 +81,8 @@ def process_video(vid_path):
             except Exception as e:
                 print(f"Status check failed: {e}")
                 break
-                
+        t2 = datetime.datetime.now()   # FIX: was datetime.datetime.time (class ref, not a call)
+        print(f"\n\nTotal time required : {(t2-t1).total_seconds():.2f}s\n")
     except Exception as e:
         print(f"Failed to upload {vid_path}: {e}")
 
