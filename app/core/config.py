@@ -40,6 +40,20 @@ class Settings(BaseSettings):
     ONNX_VISION_MODEL_FILE: str = "vision_encoder_int8.onnx"
     ONNX_TEXT_MODEL_FILE:   str = "text_encoder_int8.onnx"
 
+    # ── Model mode selector ───────────────────────────────────────────────
+    # Controls whether the engine uses separate vision + text encoder sessions
+    # or the single combined model_quantized.onnx.
+    #
+    #   None  (default) → AUTO: use split models if both files exist on disk,
+    #                     otherwise silently fall back to the combined model.
+    #   True            → FORCE SPLIT: raise FileNotFoundError at startup if
+    #                     either split file is missing (useful in CI / prod).
+    #   False           → FORCE COMBINED: always use model_quantized.onnx,
+    #                     even if split files are present on disk.
+    #
+    # Set via .env:  USE_SPLIT_MODELS=true / false / (omit for auto)
+    USE_SPLIT_MODELS: bool | None = True
+
     # ── ONNX Runtime performance flags ───────────────────────────────────
     # Number of threads for intra-op parallelism (0 = ORT auto-detect).
     # On mobile / mid-range CPUs, 2-4 is usually optimal.  Keep 0 for auto.
@@ -65,7 +79,7 @@ class Settings(BaseSettings):
     SCENE_THRESHOLD: float = 27.0
 
     # ── Legacy CUDA flag (kept for compatibility; ONNX always runs on CPU) ─
-    USE_CUDA: bool = False
+    USE_CUDA: bool = True
 
     @property
     def DEVICE(self) -> str:

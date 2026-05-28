@@ -96,21 +96,43 @@ class SigLipEngine:
     # Internal: model loading
     # ------------------------------------------------------------------
     def _load_model(self) -> None:
-        vision_path = os.path.join(settings.ONNX_MODEL_DIR, settings.ONNX_VISION_MODEL_FILE)
-        text_path   = os.path.join(settings.ONNX_MODEL_DIR, settings.ONNX_TEXT_MODEL_FILE)
+        vision_path   = os.path.join(settings.ONNX_MODEL_DIR, settings.ONNX_VISION_MODEL_FILE)
+        text_path     = os.path.join(settings.ONNX_MODEL_DIR, settings.ONNX_TEXT_MODEL_FILE)
         combined_path = os.path.join(settings.ONNX_MODEL_DIR, settings.ONNX_MODEL_FILE)
 
-        if os.path.exists(vision_path) and os.path.exists(text_path):
-            print("[SigLipEngine] Split models detected → loading vision + text separately.")
+        flag = settings.USE_SPLIT_MODELS   # True | False | None
+
+        if flag is True:
+            # ── FORCED SPLIT ─────────────────────────────────────────────
+            # Caller explicitly requires split models — raise early if missing.
+            for path, label in [(vision_path, "vision"), (text_path, "text")]:
+                if not os.path.exists(path):
+                    raise FileNotFoundError(
+                        f"USE_SPLIT_MODELS=true but {label} encoder not found:\n"
+                        f"  {path}\n"
+                        f"Run 'python tools/export_split_models.py' to generate it."
+                    )
+            print("[SigLipEngine] USE_SPLIT_MODELS=true → loading split encoders.")
             self._load_split(vision_path, text_path)
-        else:
-            print(
-                f"[SigLipEngine] Split models not found at:\n"
-                f"  {vision_path}\n  {text_path}\n"
-                f"  → Falling back to combined model: {settings.ONNX_MODEL_FILE}\n"
-                f"  Run 'python tools/export_split_models.py' once to enable split mode."
-            )
+
+        elif flag is False:
+            # ── FORCED COMBINED ──────────────────────────────────────────
+            print("[SigLipEngine] USE_SPLIT_MODELS=false → loading combined model.")
             self._load_combined(combined_path)
+
+        else:
+            # ── AUTO-DETECT (default) ────────────────────────────────────
+            if os.path.exists(vision_path) and os.path.exists(text_path):
+                print("[SigLipEngine] Split models detected (auto) → loading vision + text separately.")
+                self._load_split(vision_path, text_path)
+            else:
+                print(
+                    f"[SigLipEngine] Split models not found (auto) → combined model.\n"
+                    f"  Missing: {vision_path if not os.path.exists(vision_path) else text_path}\n"
+                    f"  Run 'python tools/export_split_models.py' to enable split mode.\n"
+                    f"  Or set USE_SPLIT_MODELS=false in .env to silence this message."
+                )
+                self._load_combined(combined_path)
 
         # Processor is shared — same tokeniser / image processor for both modes
         self.processor = SiglipProcessor.from_pretrained(settings.MODEL_NAME)

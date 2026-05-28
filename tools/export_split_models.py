@@ -131,7 +131,11 @@ def export_vision_encoder() -> None:
     wrapper = _make_vision_wrapper()
     wrapper.eval()
 
-    dummy_pixels = torch.zeros(1, 3, 224, 224, dtype=torch.float32)
+    # Use batch=2 (not 1!) so that do_constant_folding cannot collapse the
+    # batch dimension into a constant.  The dynamic_axes dict marks axis-0 as
+    # 'batch_size' (symbolic), so any batch size works at runtime — batch=2
+    # here is only to give the tracer a non-trivial shape to work with.
+    dummy_pixels = torch.zeros(2, 3, 224, 224, dtype=torch.float32)
 
     with torch.no_grad():
         torch.onnx.export(
@@ -145,8 +149,7 @@ def export_vision_encoder() -> None:
                 "image_embeds": {0: "batch_size"},
             },
             opset_version=17,
-            do_constant_folding=True,
-            verbose=False,
+            do_constant_folding=True
         )
 
     size_mb = os.path.getsize(VISION_ONNX) / 1e6
@@ -160,8 +163,10 @@ def export_text_encoder() -> None:
     wrapper = _make_text_wrapper()
     wrapper.eval()
 
-    dummy_ids  = torch.zeros(1, 64, dtype=torch.long)
-    dummy_mask = torch.ones(1, 64, dtype=torch.long)
+    # Same reasoning as the vision encoder: batch=2 prevents constant-folding
+    # from freezing the batch dimension; dynamic_axes keeps it symbolic.
+    dummy_ids  = torch.zeros(2, 64, dtype=torch.long)
+    dummy_mask = torch.ones(2, 64, dtype=torch.long)
 
     with torch.no_grad():
         torch.onnx.export(
@@ -176,8 +181,7 @@ def export_text_encoder() -> None:
                 "text_embeds":    {0: "batch_size"},
             },
             opset_version=17,
-            do_constant_folding=True,
-            verbose=False,
+            do_constant_folding=True
         )
 
     size_mb = os.path.getsize(TEXT_ONNX) / 1e6
@@ -201,28 +205,47 @@ def quantize_model(fp32_path: str, int8_path: str, label: str) -> None:
 
 
 def verify_models() -> None:
-    """Quick smoke-test: run a forward pass through each exported model."""
+    """Smoke-test: verify both exported models accept dynamic batch sizes.
+
+    Tests batch sizes 1, 2, and 8 to confirm the dynamic axis is truly live
+    end-to-end (FP32 export → INT8 quantization → ORT inference).
+    A static/frozen batch would raise a shape mismatch on anything != 1.
+    """
     import numpy as np
     import onnxruntime as ort
 
-    print("\n[Verify] Running smoke tests…")
+    print("\n[Verify] Running dynamic-batch smoke tests…")
+    _BATCH_SIZES = [1, 2, 8]  # must all succeed; failure = frozen batch dim
 
-    # Vision
+    # ── Vision encoder ────────────────────────────────────────────────
     sess_v = ort.InferenceSession(VISION_INT8, providers=["CPUExecutionProvider"])
-    dummy_pix = np.zeros((2, 3, 224, 224), dtype=np.float32)
-    out_v = sess_v.run(["image_embeds"], {"pixel_values": dummy_pix})
-    assert out_v[0].shape == (2, 768), f"Vision output shape wrong: {out_v[0].shape}"
-    print(f"  ✓ vision_encoder_int8: input (2,3,224,224) → output {out_v[0].shape}")
+    print("  Vision encoder (vision_encoder_int8.onnx):")
+    for bs in _BATCH_SIZES:
+        dummy_pix = np.zeros((bs, 3, 224, 224), dtype=np.float32)
+        out_v = sess_v.run(["image_embeds"], {"pixel_values": dummy_pix})
+        assert out_v[0].shape == (bs, 768), (
+            f"    FAIL batch={bs}: expected ({bs}, 768), got {out_v[0].shape}\n"
+            f"    → Dynamic batch axis was frozen during export or quantization.\n"
+            f"    → Re-run this script to regenerate the models."
+        )
+        print(f"    ✓ batch={bs}: input ({bs},3,224,224) → output {out_v[0].shape}")
 
-    # Text
+    # ── Text encoder ──────────────────────────────────────────────────
     sess_t = ort.InferenceSession(TEXT_INT8, providers=["CPUExecutionProvider"])
-    dummy_ids  = np.zeros((2, 64), dtype=np.int64)
-    dummy_mask = np.ones((2, 64),  dtype=np.int64)
-    out_t = sess_t.run(["text_embeds"], {"input_ids": dummy_ids, "attention_mask": dummy_mask})
-    assert out_t[0].shape == (2, 768), f"Text output shape wrong: {out_t[0].shape}"
-    print(f"  ✓ text_encoder_int8:  input (2,64) → output {out_t[0].shape}")
+    print("  Text encoder (text_encoder_int8.onnx):")
+    for bs in _BATCH_SIZES:
+        dummy_ids  = np.zeros((bs, 64), dtype=np.int64)
+        dummy_mask = np.ones((bs, 64),  dtype=np.int64)
+        out_t = sess_t.run(["text_embeds"], {"input_ids": dummy_ids, "attention_mask": dummy_mask})
+        assert out_t[0].shape == (bs, 768), (
+            f"    FAIL batch={bs}: expected ({bs}, 768), got {out_t[0].shape}\n"
+            f"    → Dynamic batch axis was frozen during export or quantization.\n"
+            f"    → Re-run this script to regenerate the models."
+        )
+        print(f"    ✓ batch={bs}: input ({bs},64) → output {out_t[0].shape}")
 
-    print("\n  All checks passed. Restart the API server to activate split-model mode.")
+    print("\n  All dynamic-batch checks passed.")
+    print("  Restart the API server to activate split-model mode.")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────
