@@ -347,3 +347,6 @@ Timestamp Retrieval
 Engineered by **Aniket-16-S**
 
 * **Please hit a star if you like this repository !**
+
+#### License
+This project is licensed under the GNU General Public License v3.0 - see the [LICENSE](https://github.com/Aniket-16-S/Semantic_Video_Search/blob/main/LICENSE) file for details.
