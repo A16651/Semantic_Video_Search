@@ -34,6 +34,12 @@ import re
 import subprocess
 import threading
 
+try:
+    import av as _av  # PyAV — FFmpeg C-library bindings (demux-only PTS map)
+    _AV_AVAILABLE = True
+except ImportError:
+    _AV_AVAILABLE = False
+
 import numpy as np
 from PIL import Image
 
@@ -83,42 +89,78 @@ def _get_video_info(video_path: str) -> dict:
 
 def _get_frame_pts_map(video_path: str) -> dict:
     """
-    Step 1: ffprobe scans all video frames and records their actual PTS.
+    Step 1: Build a {sequential_frame_idx: timestamp_seconds} PTS map.
 
-    Uses best_effort_timestamp_time which:
-    - Works correctly for VFR (variable frame rate) videos
-    - Falls back to DTS when PTS is unavailable
-    - Handles broken container timestamps gracefully
+    Primary strategy — PyAV demux-only (no subprocess, no decode):
+        Opens the container and iterates compressed video packets directly
+        in Python memory via FFmpeg's C libav* bindings.  For a 2.5-hour
+        H.264/H.265 MKV this completes in ~3-8 s and uses constant RAM.
 
-    Returns {sequential_frame_idx: timestamp_seconds}.
-    Empty dict on failure → caller falls back to frame_idx / fps.
+        B-frame safety: packets are collected, then sorted by PTS before
+        sequential indexing so that presentation order matches decode order.
+
+        Broken-PTS safety: if a packet's PTS is AV_NOPTS_VALUE (None in
+        PyAV), we fall back to its DTS.  If DTS is also None we skip that
+        packet (the last-resort fps-estimate tier covers it).
+
+    Fallback — empty dict:
+        Returned on any error; callers use frame_idx / fps instead.
     """
-    log.info("Step 1: Building PTS map via ffprobe for '%s'…", video_path)
-    cmd = [
-        "ffprobe", "-v", "quiet",
-        "-select_streams", "v:0",
-        "-show_entries", "frame=best_effort_timestamp_time",
-        "-of", "json",
-        video_path,
-    ]
+    if not _AV_AVAILABLE:
+        log.warning(
+            "PyAV not installed (pip install av).  "
+            "Timestamps will use frame_idx/fps."
+        )
+        return {}
+
+    log.info("Step 1: Building PTS map via PyAV demux for '%s'…", video_path)
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        data = json.loads(result.stdout)
-        frames = data.get("frames", [])
-        pts_map: dict = {}
-        for i, frame in enumerate(frames):
-            ts_str = frame.get("best_effort_timestamp_time", "N/A")
-            if ts_str and ts_str != "N/A":
-                try:
-                    pts_map[i] = float(ts_str)
-                except ValueError:
-                    pass
-        log.info("PTS map: %d frames indexed (from %d total reported).",
-                 len(pts_map), len(frames))
+        container = _av.open(video_path)
+        video_stream = next(
+            (s for s in container.streams if s.type == "video"), None
+        )
+        if video_stream is None:
+            log.warning("PyAV: no video stream found in '%s'.", video_path)
+            container.close()
+            return {}
+
+        time_base = float(video_stream.time_base)  # e.g. 1/90000
+
+        # ── Collect raw packet timestamps (demux only — no decode) ──────
+        raw_pts: list = []  # list of float seconds, one per video packet
+        for packet in container.demux(video_stream):
+            # Skip flush packets (pts=None, dts=None, size=0)
+            if packet.size == 0:
+                continue
+
+            # Prefer PTS (presentation timestamp); fall back to DTS
+            ts_ticks = packet.pts
+            if ts_ticks is None:
+                ts_ticks = packet.dts
+            if ts_ticks is None:
+                # Truly unknown — skip; fps-estimate tier covers this frame
+                continue
+
+            raw_pts.append(ts_ticks * time_base)
+
+        container.close()
+
+        if not raw_pts:
+            log.warning("PyAV: zero valid packet timestamps in '%s'.", video_path)
+            return {}
+
+        # ── Sort by PTS to restore presentation order (B-frame safe) ────
+        raw_pts.sort()
+
+        pts_map: dict = {i: ts for i, ts in enumerate(raw_pts)}
+        log.info(
+            "PTS map: %d packets indexed via PyAV demux.", len(pts_map)
+        )
         return pts_map
+
     except Exception as exc:
         log.warning(
-            "ffprobe PTS map failed (%s). Timestamps will use frame_idx/fps.", exc
+            "PyAV PTS map failed (%s). Timestamps will use frame_idx/fps.", exc
         )
         return {}
 
@@ -136,8 +178,14 @@ def _drain_showinfo_stderr(
     Background thread: parse 'showinfo' filter lines from FFmpeg stderr and
     push the extracted pts_time values into ts_queue.
 
-    showinfo line example:
+    showinfo line example (normal):
       [Parsed_showinfo_1 @ 0x…] n:   0 pts:   0 pts_time:0.000 pos:…
+    showinfo line example (broken PTS):
+      [Parsed_showinfo_1 @ 0x…] n:   0 pts:   0 pts_time:N/A   pos:…
+
+    IMPORTANT: when pts_time is N/A we push None (not silence) so the main
+    producer loop gets an immediate signal and can use the PyAV fallback map
+    without waiting for the 2-second queue timeout.
     """
     _pts_re = re.compile(r'pts_time:(\S+)')
     try:
@@ -149,10 +197,15 @@ def _drain_showinfo_stderr(
                 continue
             m = _pts_re.search(line)
             if m:
+                raw_val = m.group(1)
                 try:
-                    ts_queue.put(float(m.group(1)))
+                    ts_queue.put(float(raw_val))   # normal case: valid float
                 except ValueError:
-                    pass
+                    # pts_time:N/A or any non-numeric value → sentinel
+                    # Push None so the main loop falls through to PyAV map
+                    # immediately rather than stalling for the 2-second timeout.
+                    ts_queue.put(None)
+                    log.debug("showinfo pts_time='%s' (not a number); sent None sentinel.", raw_val)
     except Exception as exc:
         log.debug("stderr drain thread exited: %s", exc)
 
@@ -209,7 +262,7 @@ class VideoFrameProducer(threading.Thread):
             f"select='gt(scene,{self.scene_score})',"
             f"showinfo,"
             f"scale={_MODEL_W}:{_MODEL_H}"
-        )
+        )   
         ffmpeg_cmd = [
             "ffmpeg",
             "-i", self.video_path,
@@ -262,14 +315,38 @@ class VideoFrameProducer(threading.Thread):
 
                 # ── Resolve timestamp ──────────────────────────────────
                 # Priority 1: showinfo PTS from stderr (VFR-correct, exact)
+                #   timeout reduced to 2.0 s (was 5.0 s) — long enough for
+                #   any real pipeline lag, short enough to not block on bugs.
+                #   ts_raw may be:
+                #     float  → valid PTS in seconds          → use directly
+                #     None   → showinfo reported pts_time:N/A → fall through
+                #     (empty)→ stderr thread fell behind      → fall through
+                _use_fallback = False
                 try:
-                    timestamp = ts_queue.get(timeout=5.0)
+                    ts_raw = ts_queue.get(timeout=2.0)
+                    if ts_raw is None:
+                        # showinfo reported N/A PTS — use PyAV map / fps
+                        log.debug(
+                            "Frame %d: showinfo pts_time N/A; using fallback.",
+                            selected_idx,
+                        )
+                        _use_fallback = True
+                    else:
+                        timestamp = ts_raw
                 except queue.Empty:
-                    # Priority 2: ffprobe PTS map
+                    # stderr thread fell behind (shouldn't happen normally)
+                    log.debug(
+                        "Frame %d: showinfo queue empty after 2 s; using fallback.",
+                        selected_idx,
+                    )
+                    _use_fallback = True
+
+                if _use_fallback:
+                    # Priority 2: PyAV demux PTS map
                     if selected_idx in pts_map:
                         timestamp = pts_map[selected_idx]
                         log.debug(
-                            "Frame %d: showinfo timeout; used pts_map fallback (%.3fs)",
+                            "Frame %d: used PyAV pts_map fallback (%.3fs)",
                             selected_idx, timestamp,
                         )
                     else:

@@ -1,111 +1,349 @@
-# 🔍 Semantic Video Search Engine 
+# Semantic Video Search Engine
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-blue?style=flat&logo=python)
-![FastAPI](https://img.shields.io/badge/FastAPI-0.95%2B-009688?style=flat&logo=fastapi)
-![Qdrant](https://img.shields.io/badge/Vector_DB-Qdrant-red?style=flat)
-![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-orange?style=flat&logo=pytorch)
-![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?style=flat&logo=docker)
-
-> **"Find the exact moment a car crashes"** or **"Show me someone cooking pasta"**  across hours of videos, in milliseconds.
-
-A high-throughput, horizontally scalable video search engine powered by **Google's SigLIP** (Sigmoid Loss for Language Image Pre-Training) and **Qdrant**. Designed for production environment with asynchronous processing, producer-consumer pipelines, and multi-tenancy.
+> High-performance semantic search across videos using natural language.
+> Powered by **Google SigLIP**, **ONNX Runtime**, and **Qdrant**.  optimized for CPU execution.
 
 ---
 
-## Performance Markers
+## Overview
 
-| Benchmark | Result | Environment |
-| :--- | :--- | :--- |
-| **Throughput** | ~21 Seconds for 100 mins of video | T4 GPU (Google Colab) |
-| **Inference Latency** | < 500ms per batch (32 frames) | Google Colab  |
-| **Search Speed** | < 300ms  | Qdrant (HNSW Index) |
+This project is a resource efficient video search engine that enables users to search video content using natural language queries such as:
+
+* *"A cat playing with red ball in swimming pool"*
+* *"A young girl cooking pasta"*
+* *"A man in black Suit walking on road"*
+
+
+The system extracts semantic embeddings from video frames using **SigLIP**, stores them in **Qdrant**, and retrieves matching timestamps in milliseconds.
+
+Designed for low resource environments, the entire pipeline runs efficiently on commodity CPUs with **zero GPU dependency** while maintaining high ingestion throughput.
 
 ---
 
-## System Architecture
 
-This project has evolved from a simple script into a robust microservice architecture.
+# Performance Benchmarks
+
+## End-to-End Ingestion Speed
+
+| Video Type  | Size   | Processing Time |
+| ----------- | ------ | --------------- |
+| 1080p Video | 950 MB | ~9 minutes      |
+| 480p Video  | 300 MB | ~3 minutes      |
+
+ **Tested on intel i5 7th gen 7300U CPU with NO GPU*
+
+
+## Runtime Characteristics
+
+* **Search latency:** `< 100ms`
+* **Execution provider:** ONNX Runtime CPU EP
+* **GPU requirement:** None
+* **Baseline hardware:** Intel Core i5-7300U @ 3.2 GHz
+
+---
+
+# System Architecture
 
 ```mermaid
 graph TD
-    User[User / Client] -->|Upload Video| API[FastAPI Backend]
-    API -->|Enqueue Task| TaskQueue[Background Tasks]
+    Client[Client / User] -->|1. Upload Video| API[FastAPI Backend]
+    API -->|2. Delegate Task| BG[Asynchronous Background Worker]
     
-    subgraph "Ingestion Pipeline (Producer-Consumer)"
-        TaskQueue -->|Spawn| VLoad[Video Loader Thread]
-        VLoad -->|Stream Frames| MemBuf["Memory Buffer (Queue)"]
-        MemBuf -->|Batch Fetch| Inference[SigLIP Inference Engine]
+    subgraph IP["Ingestion Pipeline (Producer-Consumer Queue)"]
+        BG -->|Spawn| Prod[VideoFrameProducer Thread]
+        Prod -->|Stream & Decode| Decode[FFmpeg Single-Pass Decoder]
+        Decode -->|Raw RGB Frames| Queue[Bounded Frame Buffer Queue]
+        Queue -->|Batch Fetch| Cons[InferenceConsumer Thread]
+        Cons -->|3. ONNX Vision Inference| Models[SigLIP Vision Engine]
     end
     
-    Inference -->|Generate Vectors| Embeddings[Multimodal Embeddings]
-    Embeddings -->|Upsert| Qdrant[Qdrant Vector DB]
+    Models -->|4. Generate Embeddings| Embeds[L2-Normalized Vectors]
+    Embeds -->|5. Upsert| QdrantService[Qdrant Ingestion Service]
+    QdrantService -->|6. Storage with INT8 Quantization| Qdrant[(Qdrant DB)]
     
-    User -->|Search Query| API
-    API -->|Query Vector| Qdrant
-    Qdrant -->|Ranked Results| API
-
+    Client -->|7. Search Query| API
+    API -->|8. ONNX Text Inference| TextEngine[SigLIP Text Engine]
+    TextEngine -->|9. Dense Vector Search < 100ms| Qdrant
+    Qdrant -->|10. Return Ranked Timestamps| API
+    API -->|11. JSON Results| Client
 ```
 
-### Key Engineering Highlights
+---
 
-* **Multi Threaded Pipeline :** Decoupled CPU-bound video decoding from GPU bound model inference using thread safe memory queues. This design mitigates GPU starvation
+# Architectural Pillars
 
-* **Zero Copy In Memory Streaming :** Extracted video frames are streamed directly through RAM buffers into the inference batch engine without intermediate local disk writes, completely eliminating disk I/O bottlenecks and reducing hardware wear.
+## 1. Asynchronous Bounded Pipeline
 
-* **Non Blocking Asynchronous API :** Implemented utilizing FastAPI and Python's asyncio to effortlessly manage high-concurrency connections during long-running background extraction worker processes. ( branch not yet PRed )
+A concurrent producer-consumer architecture decouples:
+
+* frame decoding (FFmpeg / CPU)
+* embedding generation (ONNX inference)
+
+A bounded queue (`64 frames`) ensures:
+
+* low memory overhead
+* stable throughput
+* controlled backpressure
+
+---
+
+## 2. Single-Pass Smart Frame Extraction
+
+Frames are decoded exactly once using FFmpeg.
+
+Scene change filtering:
+
+```bash
+select='gt(scene,0.12)'
+```
+
+eliminates redundant frames before inference, resulting in:
+
+* significantly lower compute usage
+* improved semantic diversity
+* ~6–8× higher throughput compared to uniform frame sampling
+
+---
+
+## 3. Split ONNX Inference + INT8 Quantization
+
+The SigLIP model is:
+
+* quantized to INT8
+* split into dedicated vision and text encoders
+
+### Vision Encoder
+
+Used only during ingestion.
+
+### Text Encoder (~26 MB)
+
+Loaded only during search requests.
+
+### Result
+
+* ~50% faster execution
+* reduced memory usage
+* lower startup overhead
+
+---
+
+## 4. Memory-Mapped Vector Storage
+
+Qdrant stores FP32 vectors using memory-mapped storage (MMAP), while keeping only the quantized INT8 index in RAM.
+
+Benefits:
+
+* minimal RAM usage
+* scalable indexing
+* high recall retention
+
+---
+
+# Repository Structure
+
+```text
+├── app/
+│   ├── api/             # FastAPI routes & endpoint definitions
+│   ├── core/            # Configurations & settings
+│   ├── engine/          # Pipeline & inference logic
+│   ├── services/        # Qdrant interactions & background tasks
+│   └── utils/           # Hardware detection & utilities
+│
+├── db/                  # Qdrant setup scripts
+├── inference/           # Standalone inference implementations
+├── models/              # Quantized ONNX models
+├── tools/               # Quantization & model split scripts
+│
+├── app.py               # Interactive CLI utility
+├── docker-compose.yml   # Multi-container orchestration
+└── Dockerfile           # Optimized backend container
+```
 
 ---
 
 
 
-## Tech Stack
+# Key Highlights
 
-*   **Core Backend**: Python 3.10, FastAPI
-*   **AI / ML**: PyTorch, Transformers , **Google SigLIP** 
-*   **Computer Vision**: OpenCV , ffmpeg
-*   **Database**: Qdrant (Vector Store)
-*   **Infrastructure**: Docker
+| Feature                  | Details                               |
+| ------------------------ | ------------------------------------- |
+| ⚡ Query Latency          | **< 100ms**                           |
+| 🧠 Embedding Model       | **Google SigLIP**                     |
+| 🖥️ Hardware Requirement | CPU Only                              |
+| 📦 Vector Database       | Qdrant                                |
+| 🔍 Search Type           | Natural Language Semantic Search      |
+| 🚀 Runtime               | ONNX Runtime                          |
+| 🧵 Architecture          | Concurrent Producer–Consumer Pipeline |
+| 💾 Optimization          | INT8 Quantization + MMAP Storage      |
 
 ---
 
-## Installation & Usage
 
-### 1. Clone & Setup
+# Tech Stack
+
+## Backend
+
+* Python 3.12
+* FastAPI
+* Uvicorn
+
+## AI / Inference
+
+* ONNX Runtime
+* HuggingFace Transformers
+* Google SigLIP
+
+## Computer Vision
+
+* FFmpeg
+* PyAV
+* Pillow
+* NumPy
+
+## Database
+
+* Qdrant
+* HNSW Index
+* INT8 Scalar Quantization
+
+## Infrastructure
+
+* Docker
+* Docker Compose
+
+---
+
+# Getting Started
+
+Clone the repository:
+
 ```bash
 git clone https://github.com/Aniket-16-S/Semantic_Video_Search.git
 cd Semantic_Video_Search
+```
+
+---
+
+# Deployment Options
+
+## Option A — Docker Compose (Recommended)
+
+Run the complete stack including backend + Qdrant.
+
+### Start Services
+
+```bash
+docker-compose up --build -d
+```
+
+### Access API Docs
+
+```text
+http://localhost:8000/docs
+```
+
+---
+
+## Option B — Local Development
+
+Ideal for debugging and experimentation.
+
+### 1. Install Dependencies
+
+Ensure `ffmpeg` is installed and available in PATH.
+
+```bash
 pip install -r requirements.txt
 ```
 
-### 2. Run the Vector Database (Qdrant)
-You need a running Qdrant instance. The easiest way is via Docker:
-```bash
-docker run -p 6333:6333 qdrant/qdrant
-```
-*Or use Qdrant Cloud for a managed instance.*
+---
 
-### 3. Start the API Server
+### 2. Start Qdrant
+
+```bash
+docker run -d -p 6333:6333 -p 6334:6334 qdrant/qdrant
+```
+
+---
+
+### 3. Create Qdrant Collection
+
+```bash
+python db/setup_collection.py
+```
+
+---
+
+### 4. Quantize & Split Model
+
+```bash
+python tools/quantize_model.py
+```
+
+---
+
+### 5. Start API Server
+
 ```bash
 uvicorn app.main:app --reload
 ```
-The API will be available at `http://localhost:8000`.
-
-### 4. Interactive Documentation
-Go to `http://localhost:8000/docs` to test the endpoints interactively:
-*   **POST /upload**: Upload video files for processing.
-*   **POST /search**: Search your indexed videos using text.
-*   **DELETE /reset**: Clear the index.
 
 ---
 
-## Roadmap & Future Improvements
+# API Endpoints
 
-- [x] **v1.0**: Core Script (SigLip + Qdrant )
-- [x] **v2.0**: FastAPI Backend + Producer-Consumer Pipeline + Qdrant (about to be released)
-- [ ] **v3.0**: MoonDream, support for android Devices.
-- [ ] **v4.0**: Distributed Worker Nodes (Celery/Redis) for horizontal scaling
-- [ ] **Frontend**: Dashboard for video managment
+Swagger UI:
+
+```text
+http://localhost:8000/docs
+```
+
+## Core Endpoints
+
+| Method | Endpoint             | Description                   |
+| ------ | -------------------- | ----------------------------- |
+| POST   | `/api/v1/upload`     | Upload and index video files  |
+| POST   | `/api/v1/search`     | Perform semantic video search |
+| GET    | `/api/v1/videos`     | List indexed videos           |
+| DELETE | `/api/v1/video/{id}` | Delete indexed video          |
+| GET    | `/api/v1/health`     | Health & diagnostics endpoint |
 
 ---
 
-*Engineered by [Aniket-16-S](https://github.com/Aniket-16-S)*
+# Search Workflow
+
+```text
+Video Upload
+    ↓
+Frame Extraction
+    ↓
+Scene Filtering
+    ↓
+SigLIP Embeddings
+    ↓
+Qdrant Vector Storage
+    ↓
+Natural Language Search
+    ↓
+Timestamp Retrieval
+```
+
+---
+
+# Design Goals
+
+* Minimal hardware requirements
+* Production-grade ingestion throughput
+* Low memory footprint
+* Fast semantic retrieval
+* Fully CPU-compatible inference
+* Modular and scalable architecture
+
+---
+
+## Author
+
+Engineered by **Aniket-16-S**
+
+* **Please hit a star if you like this repository !**

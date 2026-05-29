@@ -313,6 +313,176 @@ class QdrantService:
         except Exception as exc:
             return {"qdrant": "error", "detail": str(exc)}
 
+    # ------------------------------------------------------------------
+    def delete_video(self, user_id: str, video_id: str) -> dict:
+        """
+        Delete all embedding vectors for a specific video belonging to a user.
+
+        Uses server-side FilterSelector so only matching points are removed —
+        no client-side fetch needed.  Safe to call even if the video doesn't exist.
+        """
+        self._ensure_client()
+
+        # Count before delete so we can report back how many frames were removed
+        count_before = self._count_for_filter(
+            qm.Filter(must=[
+                qm.FieldCondition(key="user_id",  match=qm.MatchValue(value=user_id)),
+                qm.FieldCondition(key="video_id", match=qm.MatchValue(value=video_id)),
+            ])
+        )
+
+        self.client.delete(
+            collection_name=self.collection_name,
+            points_selector=qm.FilterSelector(
+                filter=qm.Filter(must=[
+                    qm.FieldCondition(key="user_id",  match=qm.MatchValue(value=user_id)),
+                    qm.FieldCondition(key="video_id", match=qm.MatchValue(value=video_id)),
+                ])
+            ),
+        )
+
+        log.info(
+            "Deleted video_id='%s' for user='%s' (%d frames removed).",
+            video_id, user_id, count_before,
+        )
+        return {"deleted": True, "video_id": video_id, "frames_removed": count_before}
+
+    # ------------------------------------------------------------------
+    def list_user_videos(self, user_id: str) -> list:
+        """
+        Return a list of unique videos for a user, with frame counts.
+        Scrolls all matching points and aggregates in Python.
+
+        Returns [{video_id, filename, frame_count}, …] sorted by filename.
+        """
+        self._ensure_client()
+        video_map: dict = {}
+        offset = None
+
+        while True:
+            results, next_offset = self.client.scroll(
+                collection_name=self.collection_name,
+                scroll_filter=qm.Filter(must=[
+                    qm.FieldCondition(key="user_id", match=qm.MatchValue(value=user_id))
+                ]),
+                with_payload=["video_id", "filename"],
+                with_vectors=False,
+                limit=1000,
+                offset=offset,
+            )
+            for point in results:
+                vid_id   = point.payload.get("video_id", "")
+                filename = point.payload.get("filename", "")
+                if vid_id not in video_map:
+                    video_map[vid_id] = {
+                        "video_id":    vid_id,
+                        "filename":    filename,
+                        "frame_count": 0,
+                    }
+                video_map[vid_id]["frame_count"] += 1
+
+            if next_offset is None:
+                break
+            offset = next_offset
+
+        return sorted(video_map.values(), key=lambda x: x["filename"])
+
+    # ------------------------------------------------------------------
+    def list_users(self) -> list:
+        """
+        Admin: return every unique user_id found in the collection with stats.
+        Scrolls the entire collection and aggregates by user_id.
+
+        Returns [{user_id, video_count, total_frames}, …] sorted by user_id.
+        NOTE: For very large collections (millions of vectors) consider adding
+        a dedicated users metadata collection instead of scanning here.
+        """
+        self._ensure_client()
+        user_map: dict = {}
+        offset = None
+
+        while True:
+            results, next_offset = self.client.scroll(
+                collection_name=self.collection_name,
+                with_payload=["user_id", "video_id"],
+                with_vectors=False,
+                limit=1000,
+                offset=offset,
+            )
+            for point in results:
+                uid    = point.payload.get("user_id",  "") or ""
+                vid_id = point.payload.get("video_id", "") or ""
+                if uid not in user_map:
+                    user_map[uid] = {"user_id": uid, "_video_ids": set(), "total_frames": 0}
+                user_map[uid]["_video_ids"].add(vid_id)
+                user_map[uid]["total_frames"] += 1
+
+            if next_offset is None:
+                break
+            offset = next_offset
+
+        return sorted(
+            [
+                {
+                    "user_id":      uid,
+                    "video_count":  len(data["_video_ids"]),
+                    "total_frames": data["total_frames"],
+                }
+                for uid, data in user_map.items()
+            ],
+            key=lambda x: x["user_id"],
+        )
+
+    # ------------------------------------------------------------------
+    def delete_user(self, user_id: str) -> dict:
+        """
+        Admin: delete ALL data belonging to a user — every embedding for
+        every video they ever uploaded.
+
+        Returns a summary of what was removed.
+        """
+        self._ensure_client()
+
+        # Gather stats before deletion
+        videos      = self.list_user_videos(user_id)
+        video_count = len(videos)
+        frame_count = sum(v["frame_count"] for v in videos)
+
+        self.client.delete(
+            collection_name=self.collection_name,
+            points_selector=qm.FilterSelector(
+                filter=qm.Filter(must=[
+                    qm.FieldCondition(key="user_id", match=qm.MatchValue(value=user_id))
+                ])
+            ),
+        )
+
+        log.info(
+            "Admin: deleted user='%s' — %d videos, %d frames removed.",
+            user_id, video_count, frame_count,
+        )
+        return {
+            "deleted":        True,
+            "user_id":        user_id,
+            "videos_removed": video_count,
+            "frames_removed": frame_count,
+        }
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+    def _count_for_filter(self, filt: qm.Filter) -> int:
+        """Count points matching *filt* without fetching vector data."""
+        try:
+            result = self.client.count(
+                collection_name=self.collection_name,
+                count_filter=filt,
+                exact=True,
+            )
+            return result.count
+        except Exception:
+            return 0
+
 
 # ---------------------------------------------------------------------------
 # Singleton — lazy connection (won't crash the app if Qdrant is offline)

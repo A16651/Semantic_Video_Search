@@ -1,18 +1,27 @@
 """
 app/utils/hardware.py
 =====================
-Hardware Auto-Detection Module (Item 4 of the optimisation plan).
+Hardware Auto-Detection Module.
 
-Automatically selects the best ONNX Runtime Execution Provider based on
-what is available in the current environment:
+Probes available ONNX Runtime Execution Providers and returns an ordered list
+so ORT can implement a proper per-op fallback chain:
 
   Priority order
   --------------
   1. OpenVINOExecutionProvider  → Intel CPUs / Integrated GPUs (iGPU)
-     - Targets the Intel HD Graphics in GPU_FP16 mode when available.
-     - Falls back to CPU_FP32 inside OpenVINO if the iGPU is unsupported.
-  2. NNAPIExecutionProvider     → Android / Exynos / ARM-based SoCs
-  3. CPUExecutionProvider       → Universal fallback (always available)
+     Only added if the *openvino.dll runtime* is actually loadable — not just
+     if the ORT bridge DLL exists.  Uses GPU_FP16 by default; falls back to
+     CPU_FP32 inside OpenVINO if the iGPU is unreachable.
+  2. NnapiExecutionProvider     → Android / Exynos / ARM-based SoCs
+     Independent 'if' block (not 'elif') so devices that report BOTH OpenVINO
+     AND NNAPI get a full three-level chain: OpenVINO → NNAPI → CPU.
+  3. CPUExecutionProvider       → Universal fallback (always appended last)
+
+Key invariant
+-------------
+  len(providers) == len(provider_options) at all times.
+  Both lists are built with .append() only — never .insert() — so index N in
+  providers always aligns with index N in provider_options.
 
 Usage
 -----
@@ -51,8 +60,8 @@ def _is_openvino_runtime_available() -> bool:
     we skip the provider entirely and ORT goes straight to CPU with zero noise.
     """
     try:
-        from openvino.runtime import Core   # noqa: F401
-        _ = Core()                          # forces the DLL chain to load now
+        import openvino as ov   # noqa: F401
+        _ = ov.Core()                          # forces the DLL chain to load now
         return True
     except Exception:
         return False
@@ -63,14 +72,21 @@ def get_execution_providers() -> tuple[list[str], list[dict]]:
     Probe available ONNX Runtime Execution Providers and return the best
     ordered list together with any provider-specific options.
 
+    IMPORTANT — alignment contract
+    ------------------------------
+    ORT reads providers[i] and provider_options[i] as a matched pair.
+    Both lists are built exclusively with .append() so index N in providers
+    always corresponds to index N in provider_options.  Never use .insert()
+    on either list after the other has already been appended to.
+
     Returns
     -------
     providers : list[str]
-        Ordered list of provider names (highest-priority first).
-        ORT will fall through the list until one succeeds.
+        Ordered provider names (highest-priority first).
+        ORT falls through to the next provider per-op when one fails.
     provider_options : list[dict]
-        Parallel list of option dicts for each provider entry.
-        Empty dicts mean "use defaults for this provider".
+        Parallel list of option dicts — len(providers) == len(provider_options)
+        guaranteed.  Empty dicts mean "use defaults for this provider".
     """
     try:
         import onnxruntime as ort
@@ -81,37 +97,56 @@ def get_execution_providers() -> tuple[list[str], list[dict]]:
 
     log.info("Available ORT providers: %s", available)
 
-    providers: list[str] = []
-    provider_options: list[dict] = [{}]  # CPU fallback options placeholder
+    # Build both lists in strict lockstep — every .append() on one list is
+    # immediately followed by an .append() on the other.
+    providers:        list[str]  = []
+    provider_options: list[dict] = []
 
     # ── 1. OpenVINO (Intel CPU / iGPU) ─────────────────────────────────────
-    # Only add if both the ORT bridge *and* the openvino.dll runtime are present.
+    # Only added when BOTH the ORT bridge DLL AND the openvino.dll runtime are
+    # loadable.  The pre-flight check avoids the noisy DLL-not-found error that
+    # ORT would otherwise emit at session-creation time.
     if "OpenVINOExecutionProvider" in available and _is_openvino_runtime_available():
         log.info(
-            "OpenVINOExecutionProvider detected + runtime OK → targeting Intel GPU_FP16."
+            "OpenVINOExecutionProvider: runtime OK → adding to provider chain "
+            "(device=%s).", os.getenv("OPENVINO_DEVICE", "GPU_FP16")
         )
         providers.append("OpenVINOExecutionProvider")
-        provider_options.insert(0, {
+        provider_options.append({                          # index matches providers[-1]
             "device_type": os.getenv("OPENVINO_DEVICE", "GPU_FP16"),
             "enable_opencl_throttling": "false",
             "cache_dir": os.getenv("OPENVINO_CACHE_DIR", ""),
         })
     elif "OpenVINOExecutionProvider" in available:
+        # Bridge DLL found but runtime missing — skip silently
         log.info(
-            "OpenVINOExecutionProvider listed by ORT but openvino runtime not "
-            "loadable (openvino.dll missing?). Skipping — using CPU instead. "
-            "Install the full OpenVINO runtime to enable iGPU acceleration."
+            "OpenVINOExecutionProvider listed by ORT but openvino.dll runtime not "
+            "loadable. Skipping. Install the full OpenVINO runtime to enable iGPU."
         )
 
     # ── 2. NNAPI (Android / Exynos / ARM SoCs) ─────────────────────────────
-    elif "NnapiExecutionProvider" in available:
-        log.info("NnapiExecutionProvider detected → using NNAPI for hardware accel.")
+    # Intentionally an independent 'if' (not 'elif') so devices that report
+    # BOTH OpenVINO and NNAPI build the full three-provider chain:
+    #   [OpenVINOExecutionProvider, NnapiExecutionProvider, CPUExecutionProvider]
+    # ORT then tries ops in that priority order, giving maximum acceleration
+    # coverage on exotic hardware while still landing on CPU for any unsupported op.
+    if "NnapiExecutionProvider" in available:
+        log.info("NnapiExecutionProvider: adding to provider chain (FP16 enabled).")
         providers.append("NnapiExecutionProvider")
-        provider_options.insert(0, {"NNAPI_FLAG_USE_FP16": "1"})
+        provider_options.append({                          # index matches providers[-1]
+            # Allow FP16 compute on NNAPI-capable hardware (Exynos NPU, Mali GPU).
+            "NNAPI_FLAG_USE_FP16": "1",
+        })
 
-    # ── 3. CPU fallback (always appended last) ──────────────────────────────
+    # ── 3. CPU fallback (always last) ──────────────────────────────────────
     providers.append("CPUExecutionProvider")
-    provider_options[-1] = {}   # CPU options: all defaults
+    provider_options.append({})                            # index matches providers[-1]
+
+    # Sanity-check: misaligned lists would cause silent wrong-provider use.
+    assert len(providers) == len(provider_options), (
+        f"BUG: providers ({len(providers)}) and provider_options "
+        f"({len(provider_options)}) are misaligned!"
+    )
 
     log.info("Selected provider chain: %s", providers)
     return providers, provider_options

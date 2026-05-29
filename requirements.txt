@@ -43,3 +43,4 @@ torch            # needed only for initial ONNX export; remove for inference-onl
 python-multipart       # FastAPI file uploads
 pydantic-settings      # settings management
 requests               # CLI client HTTP calls
+av>=12.0.0             # PyAV: Python bindings for FFmpeg libav* (demux-only PTS map, no subprocess)
