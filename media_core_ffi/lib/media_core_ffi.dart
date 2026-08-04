@@ -3,7 +3,7 @@ import 'package:ffi/ffi.dart';
 import 'dart:io';
 
 // Declare standard Dart FFI C Types representation
-class TrackingBoxStruct extends ffi.Struct {
+final class TrackingBoxStruct extends ffi.Struct {
   @ffi.Int32()
   external int id;
 
@@ -23,7 +23,8 @@ class TrackingBoxStruct extends ffi.Struct {
   external double yMax;
 }
 
-class OCRTextResultStruct extends ffi.Struct {
+final class OCRTextResultStruct extends ffi.Struct {
+
   @ffi.Array(256)
   external ffi.Array<ffi.Uint8> text;
 
@@ -82,8 +83,20 @@ typedef ComputeMelSpectrogramDart = ffi.Pointer<ffi.Float> Function(
 typedef FreeFloatBufferC = ffi.Void Function(ffi.Pointer<ffi.Float> ptr);
 typedef FreeFloatBufferDart = void Function(ffi.Pointer<ffi.Float> ptr);
 
+typedef WhisperDecodeTokensC = ffi.Pointer<Utf8> Function(
+  ffi.Pointer<ffi.Int32> tokenIds,
+  ffi.Int32 tokenCount,
+  ffi.Pointer<Utf8> tokenizerJsonPath,
+);
+typedef WhisperDecodeTokensDart = ffi.Pointer<Utf8> Function(
+  ffi.Pointer<ffi.Int32> tokenIds,
+  int tokenCount,
+  ffi.Pointer<Utf8> tokenizerJsonPath,
+);
+
 typedef FreeByteBufferC = ffi.Void Function(ffi.Pointer<ffi.Uint8> ptr);
 typedef FreeByteBufferDart = void Function(ffi.Pointer<ffi.Uint8> ptr);
+
 
 class MediaCoreBridge {
   static ffi.DynamicLibrary? _lib;
@@ -191,6 +204,29 @@ class MediaCoreBridge {
     }
   }
 
+  static String whisperDecodeTokens(List<int> tokenIds, String tokenizerJsonPath) {
+    init();
+    final func = _lib!
+        .lookup<ffi.NativeFunction<WhisperDecodeTokensC>>('whisper_decode_tokens')
+        .asFunction<WhisperDecodeTokensDart>();
+
+    final tokenPtr = calloc<ffi.Int32>(tokenIds.length);
+    for (int i = 0; i < tokenIds.length; i++) {
+      tokenPtr[i] = tokenIds[i];
+    }
+    final pathPtr = tokenizerJsonPath.toNativeUtf8();
+
+    try {
+      final strPtr = func(tokenPtr, tokenIds.length, pathPtr);
+      final String result = strPtr.toDartString();
+      freeByte(strPtr.cast<ffi.Uint8>());
+      return result;
+    } finally {
+      calloc.free(tokenPtr);
+      calloc.free(pathPtr);
+    }
+  }
+
   static void freeFloat(ffi.Pointer<ffi.Float> ptr) {
     init();
     final func = _lib!
@@ -207,3 +243,4 @@ class MediaCoreBridge {
     func(ptr);
   }
 }
+

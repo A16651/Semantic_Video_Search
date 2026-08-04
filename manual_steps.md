@@ -1,12 +1,22 @@
 # Manual Steps & Platform Compilation Guide
 
-This document defines the instructions to compile native C++ assets, execute database bindings, and acquire on-device model files.
+This document defines the instructions to compile native C++ assets, execute database bindings, and acquire on-device model files for the Semantic Video Search project.
 
-## 1. Local C++ Library Compilation
+> **Note:** The main Flutter app resides inside the `media_core_ffi/` directory.
 
-Because compiling native C++ binaries requires platform-specific toolchains, execute the following instructions on your target operating system.
+---
 
-### A. Windows Desktop Compilation (MSVC x64)
+## 1. Platform Folder Setup & Native C++ Library Compilation
+
+### A. Generating Platform Runners (Android & Windows)
+If the `android/` or `windows/` directories do not exist inside `media_core_ffi/`, generate them by running:
+
+```bash
+cd media_core_ffi
+flutter create --platforms=windows,android .
+```
+
+### B. Windows Desktop Compilation (MSVC x64)
 
 Ensure Visual Studio with "Desktop development with C++" is installed. Launch a **Developer PowerShell for VS 2022** and execute:
 
@@ -15,9 +25,9 @@ cd media_core_ffi/native
 cl.exe /LD /O2 /EHsc media_core.cpp /Fe:media_core.dll
 ```
 
-Move the generated `media_core.dll` library to the root folder or place it in the same directory as your flutter executable.
+Move the generated `media_core.dll` library to the `media_core_ffi/` root folder or place it in the same directory as your compiled Flutter executable.
 
-### B. Android Native Development Kit (NDK) Compilation
+### C. Android Native Development Kit (NDK) Compilation
 
 Ensure your `ANDROID_NDK_HOME` environment path is set. Run:
 
@@ -32,27 +42,52 @@ $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++ \
   -o libmedia_core.so
 ```
 
-Move the generated `libmedia_core.so` directly into `android/app/src/main/jniLibs/arm64-v8a/` inside the Flutter Android runner tree.
+Copy the generated `libmedia_core.so` directly into `media_core_ffi/android/app/src/main/jniLibs/arm64-v8a/libmedia_core.so`.
 
 ---
 
-## 2. ObjectBox Code Generation
+## 2. ObjectBox Code Generation & Dependency Resolution
 
-Before running or deploying the Flutter application, compile the ObjectBox bindings and database schemas:
+Before running or deploying the Flutter application, compile the ObjectBox bindings:
 
 ```bash
 cd media_core_ffi
 flutter pub get
-flutter pub run build_runner build --delete-conflicting-outputs
+dart run build_runner build --delete-conflicting-outputs
 ```
+
+*Note: If you encounter an analyzer incompatibility error on newer Dart SDK versions, ensure `pubspec.yaml` includes `dependency_overrides` for `source_gen: ^4.0.0`.*
 
 ---
 
-## 3. Hugging Face ONNX Model Acquisition
+## 3. On-Device AI Models Setup (SigLIP, Whisper, PP-OCR)
 
-As the models (SigLIP, Whisper, PP-OCR) exceed Google Play Store boundaries (150MB Limit), they must be downloaded and hosted on direct URL CDNs.
+The offline engine requires ONNX INT8 quantized model files for visual embeddings, audio transcription, and optical character recognition.
 
-Download URL endpoints should map to:
-* **SigLIP-SO400M INT8:** `https://huggingface.co/onnx-community/SigLIP-SO400M-ONNX-INT8/resolve/main/model.onnx` (Place at `local_models/siglip.onnx`)
-* **Whisper Tiny INT8:** `https://huggingface.co/onnx-community/whisper-tiny-ONNX-INT8/resolve/main/model.onnx` (Place at `local_models/whisper.onnx`)
-* **PP-OCR INT8:** `https://huggingface.co/onnx-community/PP-OCR-INT8/resolve/main/model.onnx` (Place at `local_models/pp_ocr.onnx`)
+### Model Files to Place in `local_models/`:
+Create a `local_models/` folder inside `media_core_ffi/` and place the following ONNX files:
+* **SigLIP-SO400M / SigLIP Base INT8:** `local_models/siglip.onnx`
+  - Download from Hugging Face repositories hosting ONNX quantized vision models (e.g., [`onnx-community/siglip-base-patch16-224`](https://huggingface.co/onnx-community/siglip-base-patch16-224)) or export via `optimum-cli`.
+* **Whisper Tiny INT8:** `local_models/whisper.onnx`
+  - Download from Hugging Face [`onnx-community/whisper-tiny`](https://huggingface.co/onnx-community/whisper-tiny).
+* **PP-OCR INT8:** `local_models/pp_ocr.onnx`
+  - Download PaddleOCR ONNX INT8 model from PaddleOCR ONNX community exports.
+
+---
+
+## 4. How to Run the Application
+
+Navigate to the `media_core_ffi` directory and launch the app:
+
+### Run on Windows Desktop:
+```bash
+cd media_core_ffi
+flutter run -d windows
+```
+
+### Run on Android (Device or Emulator):
+```bash
+cd media_core_ffi
+flutter run -d android
+```
+

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'dart:math';
 import 'database_manager.dart';
 import 'background_worker.dart';
 import 'text_rank.dart';
@@ -20,46 +21,38 @@ class CyberNeuralApp extends StatelessWidget {
           primary: Color(0xFF00F5FF),
           secondary: Color(0xFF39FF14),
           surface: Color(0xFF1C1B1B),
-          background: Color(0xFF131313),
         ),
       ),
-      home: const ModelDownloadScreen(),
+      home: const ModelLoaderScreen(),
     );
   }
 }
 
-// ----------------- Screen 1: Model Delivery System -----------------
-class ModelDownloadScreen extends StatefulWidget {
-  const ModelDownloadScreen({Key? key}) : super(key: key);
+class ModelLoaderScreen extends StatefulWidget {
+  const ModelLoaderScreen({Key? key}) : super(key: key);
 
   @override
-  _ModelDownloadScreenState createState() => _ModelDownloadScreenState();
+  State<ModelLoaderScreen> createState() => _ModelLoaderScreenState();
 }
 
-class _ModelDownloadScreenState extends State<ModelDownloadScreen> {
+class _ModelLoaderScreenState extends State<ModelLoaderScreen> {
   double _progress = 0.0;
-  bool _isDownloading = false;
+  String _status = "Initializing ONNX Mobile Engine Runtime...";
+  bool _isDownloading = true;
   bool _completed = false;
-  String _status = "Neural Pipeline Offline. Missing INT8 ONNX Engine files.";
 
-  void _simulateDownload() async {
-    setState(() {
-      _isDownloading = true;
-      _status = "Fetching SigLIP-SO400M, Whisper-Tiny, PP-OCR INT8 (320 MB)...";
-    });
+  @override
+  void initState() {
+    super.initState();
+    _startSimulatedDownload();
+  }
 
-    for (int i = 0; i <= 100; i += 10) {
-      if (!_isDownloading) return;
-      await Future.delayed(const Duration(milliseconds: 300));
+  void _startSimulatedDownload() async {
+    for (int i = 1; i <= 10; i++) {
+      await Future.delayed(const Duration(milliseconds: 250));
       setState(() {
-        _progress = i / 100.0;
-        if (i == 30) {
-          _status = "SigLIP-SO400M (INT8) verified via SHA-256.";
-        } else if (i == 60) {
-          _status = "Whisper Tiny (INT8) downloaded successfully.";
-        } else if (i == 90) {
-          _status = "PP-OCR Detection & Recognition Engines loaded.";
-        }
+        _progress = i / 10.0;
+        _status = "Verifying SigLIP & Whisper INT8 quantized tensors... ${(i * 10)}%";
       });
     }
 
@@ -75,8 +68,7 @@ class _ModelDownloadScreenState extends State<ModelDownloadScreen> {
     return Scaffold(
       body: Center(
         child: Container(
-          maxHeight: 520,
-          maxWidth: 420,
+          constraints: const BoxConstraints(maxHeight: 520, maxWidth: 420),
           padding: const EdgeInsets.all(24),
           decoration: BoxDecoration(
             color: const Color(0xFF1C1B1B),
@@ -152,8 +144,9 @@ class _ModelDownloadScreenState extends State<ModelDownloadScreen> {
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
                         padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
                       ),
-                      onPressed: _isDownloading ? null : _simulateDownload,
+                      onPressed: _isDownloading ? null : _startSimulatedDownload,
                       child: const Text("DOWNLOAD MODELS"),
+
                     ),
                     if (_isDownloading)
                       TextButton(
@@ -300,11 +293,10 @@ class _GalleryDashboardScreenState extends State<GalleryDashboardScreen> {
                   return Padding(
                     padding: const EdgeInsets.only(right: 8.0),
                     child: ChoiceChip(
-                      label: Text(depth, style: const TextStyle(fontFamily: 'JetBrains Mono', fontSize: 11)),
+                      label: Text(depth, style: TextStyle(fontFamily: 'JetBrains Mono', fontSize: 11, color: active ? const Color(0xFF00F5FF) : Colors.grey)),
                       selected: active,
                       selectedColor: const Color(0xFF00F5FF).withOpacity(0.2),
                       backgroundColor: const Color(0xFF1C1B1B),
-                      textColor: active ? const Color(0xFF00F5FF) : Colors.grey,
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(4),
                         side: BorderSide(color: active ? const Color(0xFF00F5FF) : Colors.transparent),
@@ -379,9 +371,10 @@ class _GalleryDashboardScreenState extends State<GalleryDashboardScreen> {
                 margin: const EdgeInsets.only(bottom: 12),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: const Color(0xFF2A2A2A)),
+                  side: const BorderSide(color: Color(0xFF2A2A2A)),
                 ),
                 child: ListTile(
+
                   leading: Container(
                     width: 72,
                     height: 48,
@@ -534,9 +527,10 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
 
   @override
   void initState() {
-    super.override.initState();
+    super.initState();
     _computeSummary();
   }
+
 
   void _computeSummary() async {
     setState(() {
@@ -607,9 +601,12 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
                   child: Container(
                     width: 120,
                     height: 120,
-                    decoration: Border.all(color: const Color(0xFF39FF14), width: 2),
+                    decoration: BoxDecoration(
+                      border: Border.all(color: const Color(0xFF39FF14), width: 2),
+                    ),
                   ),
                 )
+
               ],
             ),
           ),

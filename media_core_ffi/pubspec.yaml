@@ -15,8 +15,14 @@ dependencies:
 dev_dependencies:
   flutter_test:
     sdk: flutter
+  flutter_lints: ^3.0.0
   objectbox_generator: ^4.0.0
   build_runner: ^2.4.6
 
+
+dependency_overrides:
+  source_gen: ^4.0.0
+
 flutter:
   uses-material-design: true
+
