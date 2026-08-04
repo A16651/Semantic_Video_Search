@@ -1,0 +1,22 @@
+name: media_core_ffi
+description: A high-performance offline on-device AI Gallery app powered by SigLIP, Whisper, PP-OCR, and ObjectBox DB.
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  ffi: ^2.1.2
+  path_provider: ^2.1.1
+  objectbox: ^4.0.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  objectbox_generator: ^4.0.0
+  build_runner: ^2.4.6
+
+flutter:
+  uses-material-design: true
