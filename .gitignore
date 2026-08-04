@@ -53,3 +53,5 @@ project_state_summary.md
 test_qdrant_data.py
 test_open.py
 test_inference.py
+media_core_ffi/.flutter-plugins-dependencies
+media_core_ffi/.dart_tool
