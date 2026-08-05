@@ -127,13 +127,25 @@ class BackgroundWorker {
 
         // Compute Spectrogram from dummy 16kHz PCM buffer
         final dummyPcm = List<int>.generate(16000 * 2, (i) => (i % 100) * 100);
-        final mel = MediaCoreBridge.computeMel(dummyPcm);
+        final mel = MediaCoreBridge.whisperComputeMel(dummyPcm);
 
         task.replyPort.send(IngestionProgress(
           videoPath: task.videoPath,
           progress: 0.85,
           currentAction: "Whisper processing complete. Decoded tokens successfully.",
         ));
+      }
+
+      if (task.processFrames) {
+        // Run normalized RGB to CHW using FFI
+        task.replyPort.send(IngestionProgress(
+          videoPath: task.videoPath,
+          progress: 0.9,
+          currentAction: "Normalizing RGB video frame via C++ FFI...",
+        ));
+
+        final dummyRgb = List<int>.generate(224 * 224 * 3, (i) => i % 256);
+        final normalized = MediaCoreBridge.normalizeRgb24HwcToChw(dummyRgb, 224, 224, 224, 224);
       }
 
       // Finish ingestion task
