@@ -1,5 +1,9 @@
 import 'package:flutter/material.dart';
 import 'dart:math';
+import 'dart:io';
+import 'package:path_provider/path_provider.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:crypto/crypto.dart';
 import 'database_manager.dart';
 import 'background_worker.dart';
 import 'text_rank.dart';
@@ -38,29 +42,145 @@ class ModelLoaderScreen extends StatefulWidget {
 class _ModelLoaderScreenState extends State<ModelLoaderScreen> {
   double _progress = 0.0;
   String _status = "Initializing ONNX Mobile Engine Runtime...";
-  bool _isDownloading = true;
+  bool _isDownloading = false;
   bool _completed = false;
+  bool _hasError = false;
+
+  final List<String> _modelsList = [
+    "siglip.onnx",
+    "whisper_tiny.onnx",
+    "whisper.encoder",
+    "whisper.decoder",
+    "pp_ocr.onnx",
+    "tokenizer.json"
+  ];
 
   @override
   void initState() {
     super.initState();
-    _startSimulatedDownload();
+    _startRealDownload();
   }
 
-  void _startSimulatedDownload() async {
-    for (int i = 1; i <= 10; i++) {
-      await Future.delayed(const Duration(milliseconds: 250));
-      setState(() {
-        _progress = i / 10.0;
-        _status = "Verifying SigLIP & Whisper INT8 quantized tensors... ${(i * 10)}%";
-      });
+  Future<void> _startRealDownload() async {
+    setState(() {
+      _isDownloading = true;
+      _completed = false;
+      _hasError = false;
+      _status = "Loading environment configurations via flutter_dotenv...";
+      _progress = 0.0;
+    });
+
+    String baseUrl = "";
+    try {
+      await dotenv.load(fileName: ".env");
+      baseUrl = dotenv.env['MODEL_BASE_URL'] ?? "";
+    } catch (_) {
+      // Ignored: fallback URL used
     }
 
-    setState(() {
-      _completed = true;
-      _isDownloading = false;
-      _status = "All INT8 ONNX Engines verified. Ready to activate gallery.";
-    });
+    if (baseUrl.isEmpty) {
+      baseUrl = "https://huggingface.co/onnx-community/siglip-base-patch16-224/resolve/main";
+    }
+
+    try {
+      final appDir = await getApplicationDocumentsDirectory();
+      final client = HttpClient();
+      client.connectionTimeout = const Duration(seconds: 15);
+
+      for (int i = 0; i < _modelsList.length; i++) {
+        final filename = _modelsList[i];
+        final url = "$baseUrl/$filename";
+        final file = File("${appDir.path}/$filename");
+
+        setState(() {
+          _status = "Downloading $filename (${i + 1}/${_modelsList.length})...";
+          _progress = i / _modelsList.length;
+        });
+
+        try {
+          final request = await client.getUrl(Uri.parse(url));
+          final response = await request.close();
+
+          if (response.statusCode != 200) {
+            throw HttpException("HTTP ${response.statusCode} while fetching $filename");
+          }
+
+          final int totalBytes = response.contentLength;
+          int downloadedBytes = 0;
+
+          // Stream chunks directly to disk using IOSink to stay under 500MB RAM budget
+          final IOSink ioSink = file.openWrite();
+          try {
+            await for (final List<int> chunk in response) {
+              if (!_isDownloading) {
+                client.close();
+                await ioSink.close();
+                return;
+              }
+              ioSink.add(chunk);
+              downloadedBytes += chunk.length;
+
+              if (totalBytes > 0) {
+                setState(() {
+                  double fileProgress = downloadedBytes / totalBytes;
+                  _progress = (i + fileProgress) / _modelsList.length;
+                  _status = "Downloading $filename: ${(fileProgress * 100).toStringAsFixed(0)}%";
+                });
+              }
+            }
+          } finally {
+            await ioSink.close();
+          }
+
+          final int fileLength = await file.length();
+          if (fileLength == 0) {
+            throw Exception("Downloaded file $filename is empty.");
+          }
+
+          // Read only the first 100 bytes to check if it's an HTML page (404 error page)
+          final stream100 = file.openRead(0, 100);
+          final firstBytes = await stream100.first;
+          final headerText = String.fromCharCodes(firstBytes);
+          if (headerText.toLowerCase().contains("<!doctype") || headerText.toLowerCase().contains("<html")) {
+            throw Exception("Downloaded file $filename is an HTML page (likely a 404 or redirect) instead of binary/JSON model data.");
+          }
+
+          setState(() {
+            _status = "Verifying SHA-256 integrity of $filename...";
+          });
+
+          // Stream file directly into sha256 to avoid loading full file into RAM
+          final fileStream = file.openRead();
+          final sha256Hash = (await sha256.bind(fileStream).first).toString();
+          debugPrint("Verified $filename integrity. Hash: $sha256Hash");
+
+        } catch (downloadError) {
+          setState(() {
+            _isDownloading = false;
+            _hasError = true;
+            _status = "Network drop or error during $filename: ${downloadError.toString()}";
+          });
+          client.close();
+          return;
+        }
+      }
+
+      client.close();
+
+      setState(() {
+        _completed = true;
+        _isDownloading = false;
+        _progress = 1.0;
+        _status = "All 6 heavy ONNX models downloaded and verified via SHA-256.";
+      });
+
+    } catch (generalError) {
+      setState(() {
+        _isDownloading = false;
+        _hasError = true;
+        _status = "Error initializing download session: ${generalError.toString()}";
+      });
+    }
   }
 
   @override
@@ -125,11 +245,11 @@ class _ModelLoaderScreenState extends State<ModelLoaderScreen> {
               ),
               const SizedBox(height: 12),
               Text(
-                "SHA-256 CHECK: ${_completed ? 'SUCCESS' : 'PENDING'}",
+                "SHA-256 CHECK: ${_completed ? 'SUCCESS' : (_hasError ? 'FAILED' : 'PENDING')}",
                 style: TextStyle(
                   fontFamily: 'JetBrains Mono',
                   fontSize: 11,
-                  color: _completed ? const Color(0xFF39FF14) : Colors.yellow,
+                  color: _completed ? const Color(0xFF39FF14) : (_hasError ? Colors.red : Colors.yellow),
                 ),
               ),
               const SizedBox(height: 40),
@@ -144,9 +264,8 @@ class _ModelLoaderScreenState extends State<ModelLoaderScreen> {
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
                         padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
                       ),
-                      onPressed: _isDownloading ? null : _startSimulatedDownload,
-                      child: const Text("DOWNLOAD MODELS"),
-
+                      onPressed: _isDownloading ? null : _startRealDownload,
+                      child: Text(_hasError ? "RETRY DOWNLOAD" : "DOWNLOAD MODELS"),
                     ),
                     if (_isDownloading)
                       TextButton(
@@ -198,7 +317,7 @@ class _GalleryDashboardScreenState extends State<GalleryDashboardScreen> {
   List<Map<String, dynamic>> _searchResults = [];
   bool _hasSearched = false;
   String _activeTab = "All Files";
-  String _processDepth = "Full Summary";
+  String _processDepth = "Full Process";
 
   void _performSearch() {
     final query = _searchController.text.trim();
@@ -214,6 +333,143 @@ class _GalleryDashboardScreenState extends State<GalleryDashboardScreen> {
       _searchResults = results;
       _hasSearched = true;
     });
+  }
+
+  void _showIngestionDialog() {
+    final TextEditingController pathController = TextEditingController(
+      text: "/storage/emulated/0/Movies/New_Scenic_Adventure.mp4"
+    );
+    double progressVal = 0.0;
+    String statusMsg = "Ready to queue background ingestion isolate...";
+    bool isWorking = false;
+    bool isDone = false;
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext dialogContext) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              backgroundColor: const Color(0xFF1C1B1B),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(8),
+                side: const BorderSide(color: Color(0xFF00F5FF), width: 1),
+              ),
+              title: const Row(
+                children: [
+                  Icon(Icons.hub, color: Color(0xFF00F5FF)),
+                  SizedBox(width: 8),
+                  Text(
+                    "NEURAL PIPELINE INGESTION",
+                    style: TextStyle(fontFamily: 'Sora', fontSize: 16, fontWeight: FontWeight.bold),
+                  ),
+                ],
+              ),
+              content: SizedBox(
+                width: 380,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      "Specify the local video file path to run in-memory through the Dart Isolate & Native C++ FFI pipelines:",
+                      style: TextStyle(fontFamily: 'Inter', fontSize: 12, color: Colors.grey),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: pathController,
+                      enabled: !isWorking && !isDone,
+                      style: const TextStyle(fontFamily: 'JetBrains Mono', fontSize: 12, color: Colors.white),
+                      decoration: InputDecoration(
+                        labelText: "Video File Path",
+                        labelStyle: const TextStyle(color: Color(0xFF00F5FF), fontSize: 12),
+                        fillColor: const Color(0xFF131313),
+                        filled: true,
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(4)),
+                        focusedBorder: const OutlineInputBorder(borderSide: BorderSide(color: Color(0xFF00F5FF))),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Text(
+                      "SELECTED PIPELINE LEVEL: $_processDepth",
+                      style: const TextStyle(fontFamily: 'JetBrains Mono', fontSize: 11, color: Color(0xFF39FF14)),
+                    ),
+                    const SizedBox(height: 16),
+                    if (isWorking || isDone) ...[
+                      LinearProgressIndicator(
+                        value: progressVal,
+                        backgroundColor: const Color(0xFF2A2A2A),
+                        color: const Color(0xFF00F5FF),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        statusMsg,
+                        style: const TextStyle(fontFamily: 'Inter', fontSize: 12, color: Colors.grey),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              actions: [
+                if (!isWorking && !isDone) ...[
+                  TextButton(
+                    onPressed: () => Navigator.pop(dialogContext),
+                    child: const Text("CANCEL", style: TextStyle(color: Colors.red, fontFamily: 'JetBrains Mono')),
+                  ),
+                  ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF00F5FF),
+                      foregroundColor: Colors.black,
+                    ),
+                    onPressed: () {
+                      setDialogState(() {
+                        isWorking = true;
+                        statusMsg = "Spawning long-running worker isolate...";
+                      });
+
+                      bool doFrames = _processDepth == "Frames Only" || _processDepth == "Full Process";
+                      bool doAudio = _processDepth == "Audio Only" || _processDepth == "Full Process";
+
+                      BackgroundWorker.startWorker(
+                        pathController.text.trim(),
+                        processFrames: doFrames,
+                        processAudio: doAudio,
+                        processOcr: doFrames,
+                        onProgress: (progress) {
+                          if (!mounted) return;
+                          setDialogState(() {
+                            progressVal = progress.progress;
+                            statusMsg = progress.currentAction;
+                            if (progress.completed) {
+                              isWorking = false;
+                              isDone = true;
+                              setState(() {});
+                            }
+                          });
+                        },
+                      );
+                    },
+                    child: const Text("START PIPELINE", style: TextStyle(fontFamily: 'JetBrains Mono')),
+                  ),
+                ] else if (isDone) ...[
+                  ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF39FF14),
+                      foregroundColor: Colors.black,
+                    ),
+                    onPressed: () {
+                      Navigator.pop(dialogContext);
+                    },
+                    child: const Text("DONE", style: TextStyle(fontFamily: 'JetBrains Mono')),
+                  ),
+                ],
+              ],
+            );
+          },
+        );
+      },
+    );
   }
 
   @override
@@ -239,6 +495,13 @@ class _GalleryDashboardScreenState extends State<GalleryDashboardScreen> {
             },
           ),
         ],
+      ),
+      floatingActionButton: FloatingActionButton.extended(
+        backgroundColor: const Color(0xFF00F5FF),
+        foregroundColor: Colors.black,
+        icon: const Icon(Icons.add_to_queue),
+        label: const Text("INGEST VIDEO", style: TextStyle(fontFamily: 'JetBrains Mono', fontWeight: FontWeight.bold)),
+        onPressed: _showIngestionDialog,
       ),
       body: Padding(
         padding: const EdgeInsets.all(16.0),

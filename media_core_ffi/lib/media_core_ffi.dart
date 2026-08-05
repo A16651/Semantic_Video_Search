@@ -24,7 +24,6 @@ final class TrackingBoxStruct extends ffi.Struct {
 }
 
 final class OCRTextResultStruct extends ffi.Struct {
-
   @ffi.Array(256)
   external ffi.Array<ffi.Uint8> text;
 
@@ -69,12 +68,12 @@ typedef ProjectImageEmbeddingDart = ffi.Pointer<ffi.Float> Function(
   ffi.Pointer<ffi.Int32> outDimension,
 );
 
-typedef ComputeMelSpectrogramC = ffi.Pointer<ffi.Float> Function(
+typedef WhisperComputeMelC = ffi.Pointer<ffi.Float> Function(
   ffi.Pointer<ffi.Int16> pcmData,
   ffi.Int32 sampleCount,
   ffi.Pointer<ffi.Int32> outBinCount,
 );
-typedef ComputeMelSpectrogramDart = ffi.Pointer<ffi.Float> Function(
+typedef WhisperComputeMelDart = ffi.Pointer<ffi.Float> Function(
   ffi.Pointer<ffi.Int16> pcmData,
   int sampleCount,
   ffi.Pointer<ffi.Int32> outBinCount,
@@ -96,6 +95,21 @@ typedef WhisperDecodeTokensDart = ffi.Pointer<Utf8> Function(
 
 typedef FreeByteBufferC = ffi.Void Function(ffi.Pointer<ffi.Uint8> ptr);
 typedef FreeByteBufferDart = void Function(ffi.Pointer<ffi.Uint8> ptr);
+
+typedef NormalizeRgb24HwcToChwC = ffi.Pointer<ffi.Float> Function(
+  ffi.Pointer<ffi.Uint8> rgbData,
+  ffi.Uint32 width,
+  ffi.Uint32 height,
+  ffi.Uint32 targetW,
+  ffi.Uint32 targetH,
+);
+typedef NormalizeRgb24HwcToChwDart = ffi.Pointer<ffi.Float> Function(
+  ffi.Pointer<ffi.Uint8> rgbData,
+  int width,
+  int height,
+  int targetW,
+  int targetH,
+);
 
 
 class MediaCoreBridge {
@@ -180,8 +194,8 @@ class MediaCoreBridge {
   static List<double> computeMel(List<int> pcmData) {
     init();
     final func = _lib!
-        .lookup<ffi.NativeFunction<ComputeMelSpectrogramC>>('compute_mel_spectrogram')
-        .asFunction<ComputeMelSpectrogramDart>();
+        .lookup<ffi.NativeFunction<WhisperComputeMelC>>('whisper_compute_mel')
+        .asFunction<WhisperComputeMelDart>();
 
     final pcmPtr = calloc<ffi.Int16>(pcmData.length);
     for (int i = 0; i < pcmData.length; i++) {
@@ -227,6 +241,20 @@ class MediaCoreBridge {
     }
   }
 
+  static ffi.Pointer<ffi.Float> normalizeRgb24(
+    ffi.Pointer<ffi.Uint8> rgbData,
+    int width,
+    int height,
+    int targetW,
+    int targetH,
+  ) {
+    init();
+    final func = _lib!
+        .lookup<ffi.NativeFunction<NormalizeRgb24HwcToChwC>>('normalize_rgb24_hwc_to_chw')
+        .asFunction<NormalizeRgb24HwcToChwDart>();
+    return func(rgbData, width, height, targetW, targetH);
+  }
+
   static void freeFloat(ffi.Pointer<ffi.Float> ptr) {
     init();
     final func = _lib!
@@ -243,4 +271,3 @@ class MediaCoreBridge {
     func(ptr);
   }
 }
-

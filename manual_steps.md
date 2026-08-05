@@ -91,3 +91,18 @@ cd media_core_ffi
 flutter run -d android
 ```
 
+---
+
+## 5. First-Launch Model Delivery & Ingestion System
+
+### A. Environment Configuration (`.env`)
+The first-launch downloader reads the `MODEL_BASE_URL` parameter from the `.env` file packaged under assets. If it is omitted or empty, it automatically defaults to the Hugging Face ONNX community path:
+```env
+MODEL_BASE_URL=https://huggingface.co/onnx-community/siglip-base-patch16-224/resolve/main
+```
+
+### B. In-Memory Pipeline Processing Flow
+When ingesting new videos, the UI provides options to select processing depths:
+* **Frames Only**: Runs scene-change detection (`compute_sad_threshold`), RGB24 HWC to CHW normalization, projects embeddings to 512-dim visual indexes, and saves frame entries.
+* **Audio Only**: Runs PocketFFT Mel-spectrogram extraction (`whisper_compute_mel`), token decodes via tokenizer.json (`whisper_decode_tokens`), generates text embeddings, and saves transcript entries.
+* **Full Process**: Runs the entire multi-modal pipeline in-memory in the background isolate.
