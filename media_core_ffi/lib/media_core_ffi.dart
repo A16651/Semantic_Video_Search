@@ -79,9 +79,6 @@ typedef WhisperComputeMelDart = ffi.Pointer<ffi.Float> Function(
   ffi.Pointer<ffi.Int32> outBinCount,
 );
 
-typedef FreeFloatBufferC = ffi.Void Function(ffi.Pointer<ffi.Float> ptr);
-typedef FreeFloatBufferDart = void Function(ffi.Pointer<ffi.Float> ptr);
-
 typedef WhisperDecodeTokensC = ffi.Pointer<Utf8> Function(
   ffi.Pointer<ffi.Int32> tokenIds,
   ffi.Int32 tokenCount,
@@ -92,6 +89,24 @@ typedef WhisperDecodeTokensDart = ffi.Pointer<Utf8> Function(
   int tokenCount,
   ffi.Pointer<Utf8> tokenizerJsonPath,
 );
+
+typedef NormalizeRgb24HwcToChwC = ffi.Pointer<ffi.Float> Function(
+  ffi.Pointer<ffi.Uint8> rgbData,
+  ffi.Uint32 width,
+  ffi.Uint32 height,
+  ffi.Uint32 targetW,
+  ffi.Uint32 targetH,
+);
+typedef NormalizeRgb24HwcToChwDart = ffi.Pointer<ffi.Float> Function(
+  ffi.Pointer<ffi.Uint8> rgbData,
+  int width,
+  int height,
+  int targetW,
+  int targetH,
+);
+
+typedef FreeFloatBufferC = ffi.Void Function(ffi.Pointer<ffi.Float> ptr);
+typedef FreeFloatBufferDart = void Function(ffi.Pointer<ffi.Float> ptr);
 
 typedef FreeByteBufferC = ffi.Void Function(ffi.Pointer<ffi.Uint8> ptr);
 typedef FreeByteBufferDart = void Function(ffi.Pointer<ffi.Uint8> ptr);
@@ -324,6 +339,7 @@ class MediaCoreBridge {
     }
   }
 
+  static List<double> normalizeRgb24(List<int> rgbData, int width, int height, int targetW, int targetH) {
   static ffi.Pointer<ffi.Float> normalizeRgb24(
     ffi.Pointer<ffi.Uint8> rgbData,
     int width,
@@ -335,6 +351,24 @@ class MediaCoreBridge {
     final func = _lib!
         .lookup<ffi.NativeFunction<NormalizeRgb24HwcToChwC>>('normalize_rgb24_hwc_to_chw')
         .asFunction<NormalizeRgb24HwcToChwDart>();
+
+    final rgbPtr = calloc<ffi.Uint8>(rgbData.length);
+    for (int i = 0; i < rgbData.length; i++) {
+      rgbPtr[i] = rgbData[i];
+    }
+
+    try {
+      final floatPtr = func(rgbPtr, width, height, targetW, targetH);
+      final size = 3 * targetW * targetH;
+      final List<double> result = [];
+      for (int i = 0; i < size; i++) {
+        result.add(floatPtr[i]);
+      }
+      freeFloat(floatPtr);
+      return result;
+    } finally {
+      calloc.free(rgbPtr);
+    }
     return func(rgbData, width, height, targetW, targetH);
   }
 

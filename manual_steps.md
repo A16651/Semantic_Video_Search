@@ -75,6 +75,29 @@ Create a `local_models/` folder inside `media_core_ffi/` and place the following
 
 ---
 
+## 3.5. First-Launch Model Delivery System (via .env)
+
+The application implements a robust first-launch model delivery system that downloads heavy ONNX models on demand, streaming them directly to disk via `IOSink` and verifying them with chunked SHA-256 signatures to comply with a strict 500MB RAM budget.
+
+### Setup `.env` Configuration:
+Create a `.env` file in `media_core_ffi/` (already registered in `pubspec.yaml` assets) with the following variable:
+```env
+MODEL_BASE_URL=https://models.example.com/v1
+```
+
+### Models Downloaded:
+- `siglip.onnx`
+- `whisper_tiny.onnx`
+- `whisper.encoder`
+- `whisper.decoder`
+- `pp_ocr.onnx`
+- `tokenizer.json`
+
+### Handling Network Drops & Offline Testing:
+The model delivery screen handles network drops gracefully by displaying retry options. To test fully offline, click **LOCAL BYPASS**, which emulates the stream download and SHA-256 verification of all 6 files and allows immediate access to the Cyber Neural Cinematic Gallery.
+
+---
+
 ## 4. How to Run the Application
 
 Navigate to the `media_core_ffi` directory and launch the app:

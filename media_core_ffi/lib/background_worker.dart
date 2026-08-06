@@ -46,6 +46,7 @@ class BackgroundWorker {
     bool processOcr = true,
     required Function(IngestionProgress) onProgress,
   }) async {
+    // If there is an existing worker running, stop it first
     // If a worker is already running, stop it first
     stopWorker();
 
