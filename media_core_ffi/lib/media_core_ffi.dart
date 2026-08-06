@@ -111,6 +111,32 @@ typedef FreeFloatBufferDart = void Function(ffi.Pointer<ffi.Float> ptr);
 typedef FreeByteBufferC = ffi.Void Function(ffi.Pointer<ffi.Uint8> ptr);
 typedef FreeByteBufferDart = void Function(ffi.Pointer<ffi.Uint8> ptr);
 
+typedef WhisperComputeMelC = ffi.Pointer<ffi.Float> Function(
+  ffi.Pointer<ffi.Int16> pcmData,
+  ffi.Int32 sampleCount,
+  ffi.Pointer<ffi.Int32> outBinCount,
+);
+typedef WhisperComputeMelDart = ffi.Pointer<ffi.Float> Function(
+  ffi.Pointer<ffi.Int16> pcmData,
+  int sampleCount,
+  ffi.Pointer<ffi.Int32> outBinCount,
+);
+
+typedef NormalizeRgb24HwcToChwC = ffi.Pointer<ffi.Float> Function(
+  ffi.Pointer<ffi.Uint8> rgbData,
+  ffi.Uint32 width,
+  ffi.Uint32 height,
+  ffi.Uint32 targetW,
+  ffi.Uint32 targetH,
+);
+typedef NormalizeRgb24HwcToChwDart = ffi.Pointer<ffi.Float> Function(
+  ffi.Pointer<ffi.Uint8> rgbData,
+  int width,
+  int height,
+  int targetW,
+  int targetH,
+);
+
 
 class MediaCoreBridge {
   static ffi.DynamicLibrary? _lib;
@@ -218,6 +244,78 @@ class MediaCoreBridge {
     }
   }
 
+  static List<double> whisperComputeMel(List<int> pcmData) {
+    init();
+    final func = _lib!
+        .lookup<ffi.NativeFunction<WhisperComputeMelC>>('whisper_compute_mel')
+        .asFunction<WhisperComputeMelDart>();
+
+    final pcmPtr = calloc<ffi.Int16>(pcmData.length);
+    for (int i = 0; i < pcmData.length; i++) {
+      pcmPtr[i] = pcmData[i];
+    }
+    final outBinPtr = calloc<ffi.Int32>();
+
+    try {
+      final floatPtr = func(pcmPtr, pcmData.length, outBinPtr);
+      final size = outBinPtr.value;
+      final List<double> result = [];
+      for (int i = 0; i < size; i++) {
+        result.add(floatPtr[i]);
+      }
+      freeFloat(floatPtr);
+      return result;
+    } finally {
+      calloc.free(pcmPtr);
+      calloc.free(outBinPtr);
+    }
+  }
+
+  static List<double> normalizeRgb24HwcToChw(
+    List<int> rgbData,
+    int width,
+    int height,
+    int targetW,
+    int targetH,
+  ) {
+    init();
+    final func = _lib!
+        .lookup<ffi.NativeFunction<NormalizeRgb24HwcToChwC>>('normalize_rgb24_hwc_to_chw')
+        .asFunction<NormalizeRgb24HwcToChwDart>();
+
+    final rgbPtr = calloc<ffi.Uint8>(rgbData.length);
+    for (int i = 0; i < rgbData.length; i++) {
+      rgbPtr[i] = rgbData[i];
+    }
+
+    try {
+      final floatPtr = func(rgbPtr, width, height, targetW, targetH);
+      final size = targetW * targetH * 3;
+      final List<double> result = [];
+      for (int i = 0; i < size; i++) {
+        result.add(floatPtr[i]);
+      }
+      freeFloat(floatPtr);
+      return result;
+    } finally {
+      calloc.free(rgbPtr);
+    }
+  }
+
+  static ffi.Pointer<ffi.Float> normalizeRgbDirect(
+    ffi.Pointer<ffi.Uint8> rgbPtr,
+    int width,
+    int height,
+    int targetW,
+    int targetH,
+  ) {
+    init();
+    final func = _lib!
+        .lookup<ffi.NativeFunction<NormalizeRgb24HwcToChwC>>('normalize_rgb24_hwc_to_chw')
+        .asFunction<NormalizeRgb24HwcToChwDart>();
+    return func(rgbPtr, width, height, targetW, targetH);
+  }
+
   static String whisperDecodeTokens(List<int> tokenIds, String tokenizerJsonPath) {
     init();
     final func = _lib!
@@ -242,6 +340,13 @@ class MediaCoreBridge {
   }
 
   static List<double> normalizeRgb24(List<int> rgbData, int width, int height, int targetW, int targetH) {
+  static ffi.Pointer<ffi.Float> normalizeRgb24(
+    ffi.Pointer<ffi.Uint8> rgbData,
+    int width,
+    int height,
+    int targetW,
+    int targetH,
+  ) {
     init();
     final func = _lib!
         .lookup<ffi.NativeFunction<NormalizeRgb24HwcToChwC>>('normalize_rgb24_hwc_to_chw')
@@ -264,6 +369,7 @@ class MediaCoreBridge {
     } finally {
       calloc.free(rgbPtr);
     }
+    return func(rgbData, width, height, targetW, targetH);
   }
 
   static void freeFloat(ffi.Pointer<ffi.Float> ptr) {
