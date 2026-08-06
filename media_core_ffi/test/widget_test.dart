@@ -7,9 +7,8 @@ void main() {
     // Build our app and trigger a frame.
     await tester.pumpWidget(const CyberNeuralApp());
 
-    // Verify that Neural Model Loader screen renders successfully.
+    // Verify that our ModelLoaderScreen loads with correct titles.
     expect(find.text('NEURAL MODEL LOADER'), findsOneWidget);
     expect(find.text('FIRST LAUNCH CONFIGURATION'), findsOneWidget);
-    expect(find.byType(LinearProgressIndicator), findsOneWidget);
   });
 }

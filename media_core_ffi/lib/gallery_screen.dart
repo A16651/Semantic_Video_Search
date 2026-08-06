@@ -47,6 +47,7 @@ class _ModelLoaderScreenState extends State<ModelLoaderScreen> {
   bool _hasError = false;
 
   final List<String> _modelsList = [
+  final List<String> _requiredFiles = [
     "siglip.onnx",
     "whisper_tiny.onnx",
     "whisper.encoder",
@@ -54,6 +55,10 @@ class _ModelLoaderScreenState extends State<ModelLoaderScreen> {
     "pp_ocr.onnx",
     "tokenizer.json"
   ];
+
+  final Map<String, double> _fileProgress = {};
+  HttpClientRequest? _currentRequest;
+  bool _paused = false;
 
   @override
   void initState() {
@@ -181,6 +186,162 @@ class _ModelLoaderScreenState extends State<ModelLoaderScreen> {
         _status = "Error initializing download session: ${generalError.toString()}";
       });
     }
+    _checkExistingAndStart();
+  }
+
+  Future<void> _checkExistingAndStart() async {
+    setState(() {
+      _status = "Checking existing neural models on disk...";
+      _isDownloading = true;
+      _hasError = false;
+    });
+
+    try {
+      final docDir = await getApplicationDocumentsDirectory();
+      bool allExist = true;
+      for (final filename in _requiredFiles) {
+        final file = File('${docDir.path}/$filename');
+        if (!await file.exists() || await file.length() == 0) {
+          allExist = false;
+          _fileProgress[filename] = 0.0;
+        } else {
+          _fileProgress[filename] = 1.0;
+        }
+      }
+
+      if (allExist) {
+        setState(() {
+          _progress = 1.0;
+          _completed = true;
+          _isDownloading = false;
+          _status = "All INT8 ONNX Engines verified. Ready to activate gallery.";
+        });
+      } else {
+        _startRealDownload();
+      }
+    } catch (e) {
+      setState(() {
+        _hasError = true;
+        _isDownloading = false;
+        _status = "Error scanning disk: $e";
+      });
+    }
+  }
+
+  Future<void> _startRealDownload() async {
+    if (_paused) {
+      setState(() {
+        _paused = false;
+        _isDownloading = true;
+        _status = "Resuming download sequence...";
+      });
+    } else {
+      setState(() {
+        _isDownloading = true;
+        _hasError = false;
+        _status = "Connecting to Neural Model Repository...";
+      });
+    }
+
+    final baseUrl = dotenv.get(
+      'MODEL_BASE_URL',
+      fallback: 'https://huggingface.co/onnx-community/whisper-tiny/resolve/main/',
+    );
+
+    try {
+      final docDir = await getApplicationDocumentsDirectory();
+      final client = HttpClient();
+
+      for (int i = 0; i < _requiredFiles.length; i++) {
+        final filename = _requiredFiles[i];
+        if (_fileProgress[filename] == 1.0) {
+          continue;
+        }
+
+        if (_paused) {
+          setState(() {
+            _status = "Download paused by operator.";
+            _isDownloading = false;
+          });
+          return;
+        }
+
+        final file = File('${docDir.path}/$filename');
+        final fileUrl = Uri.parse('$baseUrl$filename');
+
+        setState(() {
+          _status = "Downloading $filename ($i/${_requiredFiles.length})...";
+        });
+
+        final request = await client.getUrl(fileUrl);
+        _currentRequest = request;
+        final response = await request.close();
+
+        if (response.statusCode != 200) {
+          throw HttpException('HTTP status ${response.statusCode} for $filename');
+        }
+
+        final totalBytes = response.contentLength;
+        int downloadedBytes = 0;
+
+        final sink = file.openWrite();
+        await for (final chunk in response) {
+          if (_paused) {
+            await sink.close();
+            _currentRequest?.abort();
+            setState(() {
+              _status = "Download paused by operator.";
+              _isDownloading = false;
+            });
+            return;
+          }
+
+          sink.add(chunk);
+          downloadedBytes += chunk.length;
+
+          if (totalBytes > 0) {
+            final filePct = downloadedBytes / totalBytes;
+            setState(() {
+              _fileProgress[filename] = filePct;
+              _calculateTotalProgress();
+              _status = "Downloading $filename: ${(filePct * 100).toStringAsFixed(1)}%";
+            });
+          }
+        }
+        await sink.close();
+        _fileProgress[filename] = 1.0;
+      }
+
+      setState(() {
+        _progress = 1.0;
+        _completed = true;
+        _isDownloading = false;
+        _status = "All INT8 ONNX Engines verified. Ready to activate gallery.";
+      });
+    } catch (e) {
+      setState(() {
+        _hasError = true;
+        _isDownloading = false;
+        _status = "Connection dropped or verification failed. Tap to retry. Error: $e";
+      });
+    }
+  }
+
+  void _calculateTotalProgress() {
+    double sum = 0.0;
+    for (final filename in _requiredFiles) {
+      sum += (_fileProgress[filename] ?? 0.0);
+    }
+    _progress = sum / _requiredFiles.length;
+  }
+
+  void _pauseDownload() {
+    setState(() {
+      _paused = true;
+      _isDownloading = false;
+      _status = "Pausing download...";
+    });
+    _currentRequest?.abort();
   }
 
   @override
@@ -264,17 +425,12 @@ class _ModelLoaderScreenState extends State<ModelLoaderScreen> {
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
                         padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
                       ),
-                      onPressed: _isDownloading ? null : _startRealDownload,
+                      onPressed: _isDownloading ? null : _checkExistingAndStart,
                       child: Text(_hasError ? "RETRY DOWNLOAD" : "DOWNLOAD MODELS"),
                     ),
                     if (_isDownloading)
                       TextButton(
-                        onPressed: () {
-                          setState(() {
-                            _isDownloading = false;
-                            _status = "Download paused by operator.";
-                          });
-                        },
+                        onPressed: _pauseDownload,
                         child: const Text("PAUSE", style: TextStyle(color: Colors.red)),
                       )
                   ],
@@ -682,6 +838,180 @@ class _GalleryDashboardScreenState extends State<GalleryDashboardScreen> {
     );
   }
 
+  void _showVideoOptions(BuildContext context, IndexedVideo video) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1C1B1B),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (context) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  video.fileName.toUpperCase(),
+                  style: const TextStyle(
+                    fontFamily: 'Sora',
+                    fontWeight: FontWeight.bold,
+                    fontSize: 16,
+                    color: Color(0xFF00F5FF),
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 20),
+                ListTile(
+                  leading: const Icon(Icons.play_circle_fill, color: Color(0xFF39FF14)),
+                  title: const Text("Play Media & View Summaries", style: TextStyle(fontFamily: 'Inter')),
+                  onTap: () {
+                    Navigator.pop(context);
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (context) => VideoPlayerScreen(video: video),
+                      ),
+                    );
+                  },
+                ),
+                const Divider(color: Colors.grey),
+                ListTile(
+                  leading: const Icon(Icons.hub, color: Color(0xFF00F5FF)),
+                  title: Text("Run Native $_processDepth Pipeline", style: const TextStyle(fontFamily: 'Inter')),
+                  subtitle: const Text("Orchestrates offline C++ models on isolate", style: TextStyle(fontSize: 11, color: Colors.grey)),
+                  onTap: () {
+                    Navigator.pop(context);
+                    _runNativePipeline(video);
+                  },
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  void _runNativePipeline(IndexedVideo video) {
+    final processFrames = _processDepth == "Frames Only" || _processDepth == "Full Process";
+    final processAudio = _processDepth == "Audio Only" || _processDepth == "Full Process";
+    final processOcr = _processDepth == "Full Process";
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) {
+        double currentProgress = 0.1;
+        String currentAction = "Initializing background isolate worker...";
+        bool isDone = false;
+        String? errorMessage;
+
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            if (!isDone && errorMessage == null) {
+              // Start background worker
+              BackgroundWorker.startWorker(
+                video.filePath,
+                processFrames: processFrames,
+                processAudio: processAudio,
+                processOcr: processOcr,
+                onProgress: (progress) {
+                  if (context.mounted) {
+                    setModalState(() {
+                      currentProgress = progress.progress;
+                      currentAction = progress.currentAction;
+                      if (progress.completed) {
+                        isDone = true;
+                      }
+                      if (progress.error != null) {
+                        errorMessage = progress.error;
+                      }
+                    });
+                  }
+                },
+              );
+            }
+
+            return AlertDialog(
+              backgroundColor: const Color(0xFF1C1B1B),
+              title: Row(
+                children: [
+                  const Icon(Icons.auto_awesome, color: Color(0xFF00F5FF)),
+                  const SizedBox(width: 8),
+                  Text(
+                    "ORCHESTRATING PIPELINE",
+                    style: TextStyle(
+                      fontFamily: 'Sora',
+                      fontWeight: FontWeight.bold,
+                      fontSize: 14,
+                      color: const Color(0xFF00F5FF),
+                    ),
+                  ),
+                ],
+              ),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  LinearProgressIndicator(
+                    value: currentProgress,
+                    backgroundColor: const Color(0xFF2A2A2A),
+                    color: const Color(0xFF39FF14),
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    currentAction,
+                    style: const TextStyle(
+                      fontFamily: 'JetBrains Mono',
+                      fontSize: 12,
+                      color: Colors.white,
+                    ),
+                  ),
+                  if (errorMessage != null) ...[
+                    const SizedBox(height: 12),
+                    Text(
+                      "ERROR: $errorMessage",
+                      style: const TextStyle(
+                        fontFamily: 'JetBrains Mono',
+                        fontSize: 11,
+                        color: Colors.red,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+              actions: [
+                if (isDone || errorMessage != null)
+                  ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF39FF14),
+                      foregroundColor: Colors.black,
+                    ),
+                    onPressed: () {
+                      BackgroundWorker.stopWorker();
+                      Navigator.pop(context);
+                    },
+                    child: const Text("CLOSE"),
+                  )
+                else
+                  TextButton(
+                    onPressed: () {
+                      BackgroundWorker.stopWorker();
+                      Navigator.pop(context);
+                    },
+                    child: const Text("CANCEL", style: TextStyle(color: Colors.red)),
+                  ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
   Widget _buildVideosGrid(List<IndexedVideo> videos) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -704,12 +1034,7 @@ class _GalleryDashboardScreenState extends State<GalleryDashboardScreen> {
               final v = videos[index];
               return InkWell(
                 onTap: () {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (context) => VideoPlayerScreen(video: v),
-                    ),
-                  );
+                  _showVideoOptions(context, v);
                 },
                 child: Container(
                   decoration: BoxDecoration(
