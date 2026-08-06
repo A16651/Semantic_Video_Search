@@ -1,9 +1,5 @@
 import 'dart:isolate';
-import 'dart:typed_data';
-import 'package:ffi/ffi.dart';
-import 'dart:ffi' as ffi;
-import 'media_core_ffi.dart';
-import 'database_manager.dart';
+import 'worker_entry.dart';
 
 // Task description sent to background Isolate
 class BackgroundIngestionTask {
@@ -50,6 +46,9 @@ class BackgroundWorker {
     bool processOcr = true,
     required Function(IngestionProgress) onProgress,
   }) async {
+    // If there is an existing worker running, stop it first
+    stopWorker();
+
     _receivePort = ReceivePort();
 
     _receivePort!.listen((message) {
@@ -66,7 +65,7 @@ class BackgroundWorker {
       replyPort: _receivePort!.sendPort,
     );
 
-    _workerIsolate = await Isolate.spawn(_isolateEntryPoint, task);
+    _workerIsolate = await Isolate.spawn(workerEntryPoint, task);
   }
 
   static void stopWorker() {
@@ -77,81 +76,6 @@ class BackgroundWorker {
     if (_receivePort != null) {
       _receivePort!.close();
       _receivePort = null;
-    }
-  }
-
-  // Purely offline non-blocking execution block running on detached Isolate thread
-  static void _isolateEntryPoint(BackgroundIngestionTask task) {
-    try {
-      task.replyPort.send(IngestionProgress(
-        videoPath: task.videoPath,
-        progress: 0.1,
-        currentAction: "Initializing local NN ONNX models...",
-      ));
-
-      // Simulate FFI loading context within Worker Isolate thread
-      MediaCoreBridge.init();
-
-      task.replyPort.send(IngestionProgress(
-        videoPath: task.videoPath,
-        progress: 0.3,
-        currentAction: "Computing scene-change filtering SAD (Pixel-Diff)...",
-      ));
-
-      // Simulate SAD frames calculation on FFI
-      // Explicit malloc/free arrays to stay under active 1.5GB memory constraints
-      final int w = 1920;
-      final int h = 1080;
-      final ffi.Pointer<ffi.Uint8> frameA = calloc<ffi.Uint8>(w * h * 3);
-      final ffi.Pointer<ffi.Uint8> frameB = calloc<ffi.Uint8>(w * h * 3);
-
-      try {
-        // Run FFI SAD diff
-        bool isSceneChange = MediaCoreBridge.computeSad(frameA, frameB, w, h, 12.0);
-        task.replyPort.send(IngestionProgress(
-          videoPath: task.videoPath,
-          progress: 0.5,
-          currentAction: "Scene index computed (Change: $isSceneChange). Projecting embeddings...",
-        ));
-      } finally {
-        calloc.free(frameA);
-        calloc.free(frameB);
-      }
-
-      if (task.processAudio) {
-        task.replyPort.send(IngestionProgress(
-          videoPath: task.videoPath,
-          progress: 0.7,
-          currentAction: "Running Whisper Tiny Mel-spectrogram on pocketfft...",
-        ));
-
-        // Compute Spectrogram from dummy 16kHz PCM buffer
-        final dummyPcm = List<int>.generate(16000 * 2, (i) => (i % 100) * 100);
-        final mel = MediaCoreBridge.computeMel(dummyPcm);
-
-        task.replyPort.send(IngestionProgress(
-          videoPath: task.videoPath,
-          progress: 0.85,
-          currentAction: "Whisper processing complete. Decoded tokens successfully.",
-        ));
-      }
-
-      // Finish ingestion task
-      task.replyPort.send(IngestionProgress(
-        videoPath: task.videoPath,
-        progress: 1.0,
-        currentAction: "Ingestion finished. Standardized relational ObjectBox indexes updated.",
-        completed: true,
-      ));
-
-    } catch (e) {
-      task.replyPort.send(IngestionProgress(
-        videoPath: task.videoPath,
-        progress: 1.0,
-        currentAction: "Fatal extraction error.",
-        completed: true,
-        error: e.toString(),
-      ));
     }
   }
 }
