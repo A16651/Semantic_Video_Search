@@ -1,9 +1,5 @@
 import 'dart:isolate';
-import 'dart:typed_data';
-import 'package:ffi/ffi.dart';
-import 'dart:ffi' as ffi;
-import 'media_core_ffi.dart';
-import 'database_manager.dart';
+import 'worker_entry.dart';
 
 // Task description sent to background Isolate
 class BackgroundIngestionTask {
@@ -50,6 +46,9 @@ class BackgroundWorker {
     bool processOcr = true,
     required Function(IngestionProgress) onProgress,
   }) async {
+    // If a worker is already running, stop it first
+    stopWorker();
+
     _receivePort = ReceivePort();
 
     _receivePort!.listen((message) {
@@ -66,7 +65,7 @@ class BackgroundWorker {
       replyPort: _receivePort!.sendPort,
     );
 
-    _workerIsolate = await Isolate.spawn(_isolateEntryPoint, task);
+    _workerIsolate = await Isolate.spawn(workerEntryPoint, task);
   }
 
   static void stopWorker() {
