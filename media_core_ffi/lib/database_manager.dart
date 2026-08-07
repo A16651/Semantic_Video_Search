@@ -20,6 +20,28 @@ class IndexedVideo {
   });
 }
 
+class IndexedPhoto {
+  int id;
+  String filePath;
+  String fileName;
+  int sizeBytes;
+  DateTime indexedTime;
+  List<double> embedding512; // Enforced to 512 dimensions for ObjectBox KNN indexes
+  String detectedObjects; // JSON-serialized tracking labels
+
+  IndexedPhoto({
+    this.id = 0,
+    required this.filePath,
+    required this.fileName,
+    required this.sizeBytes,
+    required this.indexedTime,
+    required this.embedding512,
+    this.detectedObjects = '[]',
+  }) {
+    assert(embedding512.length == 512, "Visual database photo vectors must be strictly mapped to 512 dimensions.");
+  }
+}
+
 class VideoFrameIndex {
   int id;
   int videoId;
@@ -62,12 +84,13 @@ class AudioTranscriptIndex {
 
 class DatabaseManager {
   static final List<IndexedVideo> _videos = [];
+  static final List<IndexedPhoto> _photos = [];
   static final List<VideoFrameIndex> _frames = [];
   static final List<AudioTranscriptIndex> _transcripts = [];
 
   static void initialize() {
     // Inserts mock diagnostic seed data to prevent visual rendering placeholders
-    if (_videos.isEmpty) {
+    if (_videos.isEmpty && _photos.isEmpty) {
       _videos.addAll([
         IndexedVideo(
           id: 1,
@@ -95,15 +118,48 @@ class DatabaseManager {
         ),
       ]);
 
-      // Seed Frame indexes (512 dimensions)
       final rand = Random(42);
+
+      _photos.addAll([
+        IndexedPhoto(
+          id: 101,
+          filePath: '/storage/emulated/0/DCIM/Camera/IMG_Mountain_View.jpg',
+          fileName: 'IMG_Mountain_View.jpg',
+          sizeBytes: 3410291,
+          indexedTime: DateTime.now().subtract(const Duration(hours: 4)),
+          embedding512: List<double>.generate(512, (_) => rand.nextDouble() * 2 - 1),
+          detectedObjects: '["mountain", "sky", "snow"]',
+        ),
+        IndexedPhoto(
+          id: 102,
+          filePath: '/storage/emulated/0/DCIM/Camera/IMG_Lasagna_Cooking.jpg',
+          fileName: 'IMG_Lasagna_Cooking.jpg',
+          sizeBytes: 2102911,
+          indexedTime: DateTime.now().subtract(const Duration(days: 2)),
+          embedding512: List<double>.generate(512, (_) => rand.nextDouble() * 2 - 1),
+          detectedObjects: '["food", "lasagna", "plate", "kitchen"]',
+        ),
+        IndexedPhoto(
+          id: 103,
+          filePath: '/storage/emulated/0/DCIM/Camera/IMG_Drone_Remote.jpg',
+          fileName: 'IMG_Drone_Remote.jpg',
+          sizeBytes: 1849102,
+          indexedTime: DateTime.now().subtract(const Duration(days: 6)),
+          embedding512: List<double>.generate(512, (_) => rand.nextDouble() * 2 - 1),
+          detectedObjects: '["remote", "drone", "hand", "beach"]',
+        ),
+      ]);
+
+      // Seed Frame indexes (512 dimensions)
       for (var v in _videos) {
         for (int ms = 1000; ms < v.durationMs; ms += 5000) {
           _frames.add(VideoFrameIndex(
             videoId: v.id,
             timestampMs: ms,
             embedding512: List<double>.generate(512, (_) => rand.nextDouble() * 2 - 1),
-            detectedObjects: '["person", "backpack", "tree", "mountain"]',
+            detectedObjects: v.id == 1
+                ? '["person", "backpack", "tree", "mountain"]'
+                : (v.id == 2 ? '["lasagna", "family", "birthday", "cake"]' : '["sea", "coastline", "drone", "wave"]'),
             detectedFaces: '[]',
           ));
         }
@@ -148,8 +204,17 @@ class DatabaseManager {
     return _videos;
   }
 
+  static List<IndexedPhoto> getAllPhotos() {
+    initialize();
+    return _photos;
+  }
+
   static void addVideo(IndexedVideo video) {
     _videos.add(video);
+  }
+
+  static void addPhoto(IndexedPhoto photo) {
+    _photos.add(photo);
   }
 
   static void addFrame(VideoFrameIndex frame) {
@@ -160,13 +225,24 @@ class DatabaseManager {
     _transcripts.add(transcript);
   }
 
-  // Purely offline Cosine/KNN search based on target text query (standardized at 512 dimensions)
+  static List<AudioTranscriptIndex> getTranscriptsForVideo(int videoId) {
+    initialize();
+    return _transcripts.where((t) => t.videoId == videoId).toList();
+  }
+
+  static List<VideoFrameIndex> getFramesForVideo(int videoId) {
+    initialize();
+    return _frames.where((f) => f.videoId == videoId).toList();
+  }
+
+  // Purely offline Cosine/KNN search based on target text query across BOTH photos and video frames (standardized at 512 dimensions)
   static List<Map<String, dynamic>> searchVisualSemantic(List<double> queryVector, {double minConfidence = 0.15}) {
     initialize();
     assert(queryVector.length == 512, "Query vectors for offline ObjectBox similarity matching must be exactly 512 dimensions.");
 
     final List<Map<String, dynamic>> hits = [];
 
+    // 1. Search across Video Frames
     for (var f in _frames) {
       double dotProduct = 0.0;
       double normA = 0.0;
@@ -184,8 +260,33 @@ class DatabaseManager {
       if (score >= minConfidence) {
         final video = _videos.firstWhere((v) => v.id == f.videoId);
         hits.add({
+          'type': 'video',
           'video': video,
           'frame': f,
+          'score': score,
+        });
+      }
+    }
+
+    // 2. Search across Photos
+    for (var p in _photos) {
+      double dotProduct = 0.0;
+      double normA = 0.0;
+      double normB = 0.0;
+      for (int i = 0; i < 512; i++) {
+        dotProduct += queryVector[i] * p.embedding512[i];
+        normA += queryVector[i] * queryVector[i];
+        normB += p.embedding512[i] * p.embedding512[i];
+      }
+      double score = 0.0;
+      if (normA > 0.0 && normB > 0.0) {
+        score = dotProduct / (sqrt(normA) * sqrt(normB));
+      }
+
+      if (score >= minConfidence) {
+        hits.add({
+          'type': 'photo',
+          'photo': p,
           'score': score,
         });
       }
@@ -195,7 +296,7 @@ class DatabaseManager {
     return hits;
   }
 
-  // Offline text-based transcript transcript matching (cosine similarity)
+  // Offline text-based transcript similarity matching (cosine similarity)
   static List<Map<String, dynamic>> searchAudioSemantic(List<double> queryVector, {double minConfidence = 0.15}) {
     initialize();
     assert(queryVector.length == 512, "Query vectors for offline ObjectBox similarity matching must be exactly 512 dimensions.");
