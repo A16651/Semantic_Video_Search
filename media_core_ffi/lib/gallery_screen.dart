@@ -9,6 +9,9 @@ import 'package:path_provider/path_provider.dart';
 import 'package:photo_manager/photo_manager.dart';
 import 'package:receive_sharing_intent/receive_sharing_intent.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:video_player/video_player.dart';
+import 'package:file_picker/file_picker.dart';
 
 import 'database_manager.dart';
 import 'background_worker.dart';
@@ -67,35 +70,45 @@ class _ModelLoaderScreenState extends State<ModelLoaderScreen> {
   bool _hasError = false;
   String _errorDetails = "";
 
-  final List<String> _filesToDownload = [
-    'siglip.onnx',
-    'whisper_tiny.onnx',
-    'whisper.encoder',
-    'whisper.decoder',
-    'pp_ocr.onnx',
-    'tokenizer.json'
-  ];
+  final Map<String, String> _filesToDownload = {
+    'decoder_model.onnx': 'https://huggingface.co/A-16-S/semantic-search-private/resolve/main/decoder_model.onnx',
+    'decoder_with_past_model.onnx': 'https://huggingface.co/A-16-S/semantic-search-private/resolve/main/decoder_with_past_model.onnx',
+    'encoder_model.onnx': 'https://huggingface.co/A-16-S/semantic-search-private/resolve/main/encoder_model.onnx',
+    'ppocr_det_fp32.onnx': 'https://huggingface.co/A-16-S/semantic-search-private/resolve/main/ppocr_det_fp32.onnx',
+    'ppocr_rec_fp32.onnx': 'https://huggingface.co/A-16-S/semantic-search-private/resolve/main/ppocr_rec_fp32.onnx',
+    'siglip.onnx': 'https://huggingface.co/A-16-S/semantic-search-private/resolve/main/siglip.onnx',
+    'tokenizer.json': 'https://huggingface.co/A-16-S/semantic-search-private/resolve/main/tokenizer.json',
+  };
 
   final Map<String, double> _fileProgress = {};
   final Map<String, String> _fileStatus = {};
-  final Map<String, String> _verifiedHashes = {};
 
   HttpClientRequest? _currentRequest;
-  bool _paused = false;
 
   @override
   void initState() {
     super.initState();
-    _checkExistingFiles();
+    _checkExistingFiles().then((_) {
+      if (!_completed) {
+        _downloadModels();
+      } else {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(builder: (context) => const GalleryDashboardScreen()),
+          );
+        });
+      }
+    });
   }
 
   Future<void> _checkExistingFiles() async {
     try {
       final Directory appDir = await getApplicationDocumentsDirectory();
       bool allExist = true;
-      for (final fileName in _filesToDownload) {
+      _filesToDownload.forEach((fileName, url) {
         final localFile = File('${appDir.path}/$fileName');
-        if (!await localFile.exists() || await localFile.length() == 0) {
+        if (!localFile.existsSync() || localFile.lengthSync() == 0) {
           allExist = false;
           _fileStatus[fileName] = "Pending";
           _fileProgress[fileName] = 0.0;
@@ -103,17 +116,17 @@ class _ModelLoaderScreenState extends State<ModelLoaderScreen> {
           _fileStatus[fileName] = "Verified Local";
           _fileProgress[fileName] = 1.0;
         }
-      }
+      });
 
       if (allExist) {
         setState(() {
           _completed = true;
           _progress = 1.0;
-          _status = "All 6 ONNX engines verified locally. Ready to activate gallery.";
+          _status = "All 7 neural engines verified locally.";
         });
       } else {
         setState(() {
-          _status = "Some heavy models are missing. Click DOWNLOAD MODELS to stream via MODEL_BASE_URL.";
+          _status = "Required models are missing. Initializing download...";
         });
       }
     } catch (e) {
@@ -124,48 +137,24 @@ class _ModelLoaderScreenState extends State<ModelLoaderScreen> {
   }
 
   Future<void> _downloadModels() async {
-    if (_paused) {
-      setState(() {
-        _paused = false;
-        _isDownloading = true;
-        _status = "Resuming download sequence...";
-      });
-    } else {
-      setState(() {
-        _isDownloading = true;
-        _hasError = false;
-        _errorDetails = "";
-        _status = "Loading environment configurations...";
-      });
-    }
-
-    try {
-      await dotenv.load(fileName: ".env");
-    } catch (e) {
-      // Allow fallback if load fails
-    }
-
-    final baseUrl = dotenv.env['MODEL_BASE_URL'] ?? "https://huggingface.co/onnx-community/whisper-tiny/resolve/main/";
-    final cleanBaseUrl = baseUrl.endsWith('/') ? baseUrl : '$baseUrl/';
+    setState(() {
+      _isDownloading = true;
+      _hasError = false;
+      _errorDetails = "";
+      _status = "Connecting to model repository...";
+    });
 
     final Directory appDir = await getApplicationDocumentsDirectory();
     final client = HttpClient();
     client.connectionTimeout = const Duration(seconds: 15);
 
     try {
-      for (int i = 0; i < _filesToDownload.length; i++) {
-        final fileName = _filesToDownload[i];
+      final keys = _filesToDownload.keys.toList();
+      for (int i = 0; i < keys.length; i++) {
+        final fileName = keys[i];
         if (_fileProgress[fileName] == 1.0) continue;
 
-        if (_paused) {
-          setState(() {
-            _status = "Download paused by operator.";
-            _isDownloading = false;
-          });
-          return;
-        }
-
-        final fileUrl = '$cleanBaseUrl$fileName';
+        final fileUrl = _filesToDownload[fileName]!;
         final localFile = File('${appDir.path}/$fileName');
 
         setState(() {
@@ -176,7 +165,7 @@ class _ModelLoaderScreenState extends State<ModelLoaderScreen> {
 
         bool fileSuccess = false;
         int retries = 0;
-        const maxRetries = 1;
+        const maxRetries = 2;
 
         while (!fileSuccess && retries <= maxRetries) {
           IOSink? ioSink;
@@ -193,22 +182,9 @@ class _ModelLoaderScreenState extends State<ModelLoaderScreen> {
             int bytesDownloaded = 0;
 
             ioSink = localFile.openWrite();
-            final outputSink = AccumulatorSink<Digest>();
-            final shaSink = sha256.startChunkedConversion(outputSink);
 
             await for (final chunk in response) {
-              if (_paused) {
-                await ioSink.close();
-                _currentRequest?.abort();
-                setState(() {
-                  _status = "Download paused by operator.";
-                  _isDownloading = false;
-                });
-                return;
-              }
-
               ioSink.add(chunk);
-              shaSink.add(chunk);
               bytesDownloaded += chunk.length;
 
               if (contentLength > 0) {
@@ -222,14 +198,10 @@ class _ModelLoaderScreenState extends State<ModelLoaderScreen> {
             }
 
             await ioSink.close();
-            shaSink.close();
-
-            final digest = outputSink.events.single;
-            final calculatedHash = digest.toString();
+            ioSink = null;
 
             setState(() {
-              _verifiedHashes[fileName] = calculatedHash;
-              _fileStatus[fileName] = "Verified SHA-256";
+              _fileStatus[fileName] = "Complete";
               _fileProgress[fileName] = 1.0;
               _calculateTotalProgress();
             });
@@ -256,99 +228,33 @@ class _ModelLoaderScreenState extends State<ModelLoaderScreen> {
         _completed = true;
         _isDownloading = false;
         _progress = 1.0;
-        _status = "All 6 ONNX engines verified successfully via SHA-256.";
+        _status = "All 7 neural engines downloaded successfully.";
       });
+
+      if (mounted) {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (context) => const GalleryDashboardScreen()),
+        );
+      }
     } catch (e) {
       client.close();
       setState(() {
         _hasError = true;
         _isDownloading = false;
         _errorDetails = e.toString();
-        _status = "Connection drop / download failure. Please retry or run Local Bypass Emulation.";
+        _status = "Download failed. Tap RETRY to resume.";
       });
     }
   }
 
   void _calculateTotalProgress() {
     double sum = 0.0;
-    for (final filename in _filesToDownload) {
+    _filesToDownload.keys.forEach((filename) {
       sum += (_fileProgress[filename] ?? 0.0);
-    }
+    });
     setState(() {
       _progress = sum / _filesToDownload.length;
-    });
-  }
-
-  void _pauseDownload() {
-    setState(() {
-      _paused = true;
-      _isDownloading = false;
-      _status = "Pausing download...";
-    });
-    _currentRequest?.abort();
-  }
-
-  Future<void> _activateLocalBypass() async {
-    setState(() {
-      _isDownloading = true;
-      _hasError = false;
-      _errorDetails = "";
-      _status = "Initializing Local Emulation Bypass...";
-    });
-
-    final Directory appDir = await getApplicationDocumentsDirectory();
-
-    for (int i = 0; i < _filesToDownload.length; i++) {
-      final fileName = _filesToDownload[i];
-      final localFile = File('${appDir.path}/$fileName');
-
-      setState(() {
-        _status = "Emulating local stream generation for $fileName (${i + 1}/${_filesToDownload.length})...";
-        _fileStatus[fileName] = "Streaming...";
-        _fileProgress[fileName] = 0.0;
-        _progress = i / _filesToDownload.length;
-      });
-
-      final ioSink = localFile.openWrite();
-      final outputSink = AccumulatorSink<Digest>();
-      final shaSink = sha256.startChunkedConversion(outputSink);
-
-      final totalEmulatedSize = 10 * 1024; // 10KB
-      final chunkSize = 1024;
-      int bytesWritten = 0;
-
-      for (int step = 0; step < 10; step++) {
-        await Future.delayed(const Duration(milliseconds: 30));
-        final chunk = List<int>.generate(chunkSize, (idx) => (idx + step) % 256);
-        ioSink.add(chunk);
-        shaSink.add(chunk);
-        bytesWritten += chunk.length;
-
-        final double prog = bytesWritten / totalEmulatedSize;
-        setState(() {
-          _fileProgress[fileName] = prog;
-          _progress = (i + prog) / _filesToDownload.length;
-        });
-      }
-
-      await ioSink.close();
-      shaSink.close();
-
-      final digest = outputSink.events.single;
-      final calculatedHash = digest.toString();
-
-      setState(() {
-        _verifiedHashes[fileName] = calculatedHash;
-        _fileStatus[fileName] = "Verified SHA-256";
-        _fileProgress[fileName] = 1.0;
-      });
-    }
-
-    setState(() {
-      _completed = true;
-      _isDownloading = false;
-      _progress = 1.0;
-      _status = "Local Emulation bypass complete. All 6 engines active.";
     });
   }
 
@@ -357,7 +263,7 @@ class _ModelLoaderScreenState extends State<ModelLoaderScreen> {
     return Scaffold(
       body: Center(
         child: Container(
-          constraints: const BoxConstraints(maxHeight: 580, maxWidth: 440),
+          constraints: const BoxConstraints(maxHeight: 480, maxWidth: 440),
           padding: const EdgeInsets.all(24),
           decoration: BoxDecoration(
             color: const Color(0xFF1C1B1B),
@@ -414,7 +320,7 @@ class _ModelLoaderScreenState extends State<ModelLoaderScreen> {
               ),
               const SizedBox(height: 12),
               Text(
-                "SHA-256 CHECK: ${_completed ? 'SUCCESS' : (_hasError ? 'FAILED' : 'PENDING')}",
+                "DOWNLOAD STATUS: ${_completed ? 'SUCCESS' : (_hasError ? 'FAILED' : 'DOWNLOADING')}",
                 style: TextStyle(
                   fontFamily: 'JetBrains Mono',
                   fontSize: 11,
@@ -429,69 +335,18 @@ class _ModelLoaderScreenState extends State<ModelLoaderScreen> {
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                 ),
-                const SizedBox(height: 8),
-              ],
-              const SizedBox(height: 24),
-              if (!_completed) ...[
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                  children: [
-                    Expanded(
-                      child: Padding(
-                        padding: const EdgeInsets.only(right: 8.0),
-                        child: ElevatedButton(
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFF00F5FF),
-                            foregroundColor: Colors.black,
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
-                            padding: const EdgeInsets.symmetric(vertical: 12),
-                          ),
-                          onPressed: _isDownloading ? null : _downloadModels,
-                          child: const Text("DOWNLOAD", maxLines: 1, overflow: TextOverflow.ellipsis),
-                        ),
-                      ),
-                    ),
-                    Expanded(
-                      child: Padding(
-                        padding: const EdgeInsets.only(left: 8.0),
-                        child: ElevatedButton(
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFF39FF14),
-                            foregroundColor: Colors.black,
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
-                            padding: const EdgeInsets.symmetric(vertical: 12),
-                          ),
-                          onPressed: _isDownloading ? null : _activateLocalBypass,
-                          child: const Text("LOCAL BYPASS", maxLines: 1, overflow: TextOverflow.ellipsis),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                if (_isDownloading) ...[
-                  const SizedBox(height: 12),
-                  TextButton(
-                    onPressed: _pauseDownload,
-                    child: const Text("PAUSE DOWNLOAD", style: TextStyle(color: Colors.red, fontFamily: 'JetBrains Mono')),
-                  )
-                ]
-              ] else ...[
+                const SizedBox(height: 16),
                 ElevatedButton(
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF39FF14),
+                    backgroundColor: const Color(0xFF00F5FF),
                     foregroundColor: Colors.black,
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
-                    padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 16),
+                    padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 12),
                   ),
-                  onPressed: () {
-                    Navigator.pushReplacement(
-                      context,
-                      MaterialPageRoute(builder: (context) => const GalleryDashboardScreen()),
-                    );
-                  },
-                  child: const Text("ENTER CYBER GALLERY"),
-                )
-              ]
+                  onPressed: _downloadModels,
+                  child: const Text("RETRY DOWNLOAD"),
+                ),
+              ],
             ],
           ),
         ),
@@ -533,12 +388,22 @@ class _GalleryDashboardScreenState extends State<GalleryDashboardScreen> {
     'drone': 'Coastal Flyovers 🌊',
   };
 
+  Future<void> _requestPermissions() async {
+    if (Platform.isAndroid) {
+      if (await Permission.manageExternalStorage.isDenied) {
+        await Permission.manageExternalStorage.request();
+      }
+    }
+  }
+
   @override
   void initState() {
     super.initState();
     _initService();
     _initSharingReceiver();
-    _scanDeviceMedia();
+    _requestPermissions().then((_) {
+      _scanDeviceMedia();
+    });
   }
 
   @override
@@ -687,22 +552,26 @@ class _GalleryDashboardScreenState extends State<GalleryDashboardScreen> {
     // 2. Windows scanning via standard system Pictures and Videos directories
     if (Platform.isWindows) {
       try {
-        final picturesDir = await getTemporaryDirectory(); // In standard code we fetch Pictures, we use fallback here
-        final List<String> targetDirs = [picturesDir.path];
+        await DatabaseManager.loadWatchedDirectories();
+        final List<String> targetDirs = [
+          ...DatabaseManager.getWatchedDirectories()
+        ];
         // Scan standard windows folders recursively
         for (var dirPath in targetDirs) {
           final dir = Directory(dirPath);
           if (await dir.exists()) {
-            final List<FileSystemEntity> entities = dir.listSync(recursive: false);
+            final List<FileSystemEntity> entities = dir.listSync(recursive: true);
             for (var entity in entities) {
               if (entity is File) {
                 final path = entity.path;
                 final name = path.split('\\').last;
                 final size = await entity.length();
-                if (path.endsWith('.jpg') || path.endsWith('.jpeg') || path.endsWith('.png')) {
+                final ext = name.split('.').last.toLowerCase();
+
+                if (['jpg', 'jpeg', 'png', 'webp'].contains(ext)) {
                   final exists = DatabaseManager.getAllPhotos().any((p) => p.filePath == path);
                   if (!exists) {
-                    DatabaseManager.addPhoto(IndexedPhoto(
+                    final photo = IndexedPhoto(
                       id: Random().nextInt(1000000) + 4000,
                       filePath: path,
                       fileName: name,
@@ -710,19 +579,22 @@ class _GalleryDashboardScreenState extends State<GalleryDashboardScreen> {
                       indexedTime: DateTime.now(),
                       embedding512: List<double>.generate(512, (_) => Random().nextDouble() * 2 - 1),
                       detectedObjects: '["windows", "scanned"]',
-                    ));
+                    );
+                    DatabaseManager.addPhoto(photo);
                   }
-                } else if (path.endsWith('.mp4') || path.endsWith('.avi') || path.endsWith('.mkv')) {
+                } else if (['mp4', 'avi', 'mkv', 'mov'].contains(ext)) {
                   final exists = DatabaseManager.getAllVideos().any((v) => v.filePath == path);
                   if (!exists) {
-                    DatabaseManager.addVideo(IndexedVideo(
+                    final video = IndexedVideo(
                       id: Random().nextInt(1000000) + 5000,
                       filePath: path,
                       fileName: name,
                       durationMs: 40000,
                       sizeBytes: size,
                       indexedTime: DateTime.now(),
-                    ));
+                    );
+                    DatabaseManager.addVideo(video);
+                    _runBackgroundIngestion(video);
                   }
                 }
               }
@@ -835,6 +707,74 @@ class _GalleryDashboardScreenState extends State<GalleryDashboardScreen> {
       _searchResults = combinedHits;
       _hasSearched = true;
     });
+  }
+
+  Future<void> _importMedia() async {
+    try {
+      FilePickerResult? result = await FilePicker.pickFiles(
+        allowMultiple: true,
+        type: FileType.custom,
+        allowedExtensions: ['mp4', 'mkv', 'avi', 'mov', 'jpg', 'jpeg', 'png', 'webp'],
+      );
+
+      if (result != null && result.files.isNotEmpty) {
+        int videosImported = 0;
+        int photosImported = 0;
+
+        for (var file in result.files) {
+          final path = file.path;
+          if (path == null) continue;
+
+          final name = file.name;
+          final size = file.size;
+
+          final ext = name.split('.').last.toLowerCase();
+          final isVideo = ['mp4', 'mkv', 'avi', 'mov'].contains(ext);
+
+          if (isVideo) {
+            final video = IndexedVideo(
+              id: Random().nextInt(1000000) + 7000,
+              filePath: path,
+              fileName: name,
+              durationMs: 30000, // Default fallback
+              sizeBytes: size,
+              indexedTime: DateTime.now(),
+            );
+            DatabaseManager.addVideo(video);
+            _runBackgroundIngestion(video);
+            videosImported++;
+          } else {
+            final photo = IndexedPhoto(
+              id: Random().nextInt(1000000) + 8000,
+              filePath: path,
+              fileName: name,
+              sizeBytes: size,
+              indexedTime: DateTime.now(),
+              embedding512: List<double>.generate(512, (_) => Random().nextDouble() * 2 - 1),
+              detectedObjects: '["imported", "local"]',
+            );
+            DatabaseManager.addPhoto(photo);
+            photosImported++;
+          }
+        }
+
+        _scanDeviceMedia();
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              backgroundColor: const Color(0xFF1C1B1B),
+              content: Text(
+                "Successfully imported $videosImported videos and $photosImported photos!",
+                style: const TextStyle(color: Color(0xFF39FF14), fontFamily: 'JetBrains Mono'),
+              ),
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      debugPrint("Error picking files: $e");
+    }
   }
 
   void _runBackgroundIngestion(IndexedVideo video) {
@@ -1202,8 +1142,8 @@ class _GalleryDashboardScreenState extends State<GalleryDashboardScreen> {
         backgroundColor: const Color(0xFF00F5FF),
         foregroundColor: Colors.black,
         icon: const Icon(Icons.add_to_queue),
-        label: const Text("INGEST VIDEO", style: TextStyle(fontFamily: 'JetBrains Mono', fontWeight: FontWeight.bold)),
-        onPressed: _showIngestionDialog,
+        label: const Text("IMPORT MEDIA", style: TextStyle(fontFamily: 'JetBrains Mono', fontWeight: FontWeight.bold)),
+        onPressed: _importMedia,
       ),
       body: Padding(
         padding: const EdgeInsets.all(16.0),
@@ -1424,9 +1364,20 @@ class _GalleryDashboardScreenState extends State<GalleryDashboardScreen> {
               child: Stack(
                 children: [
                   Positioned.fill(
-                    child: Opacity(
-                      opacity: 0.2,
-                      child: Icon(Icons.image, size: 70, color: const Color(0xFF39FF14).withOpacity(0.4)),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child: Opacity(
+                        opacity: 0.3,
+                        child: Image.file(
+                          File(photo.filePath),
+                          fit: BoxFit.cover,
+                          errorBuilder: (context, error, stackTrace) {
+                            return Center(
+                              child: Icon(Icons.image, size: 70, color: const Color(0xFF39FF14).withOpacity(0.4)),
+                            );
+                          },
+                        ),
+                      ),
                     ),
                   ),
                   Positioned(
@@ -1779,18 +1730,27 @@ class _GalleryDashboardScreenState extends State<GalleryDashboardScreen> {
                       color: Colors.black,
                       borderRadius: BorderRadius.circular(8),
                     ),
-                    child: Center(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          const Icon(Icons.image, size: 80, color: Color(0xFF39FF14)),
-                          const SizedBox(height: 12),
-                          Text(
-                            photo.filePath,
-                            textAlign: TextAlign.center,
-                            style: const TextStyle(fontSize: 10, color: Colors.grey, fontFamily: 'JetBrains Mono'),
-                          )
-                        ],
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child: Image.file(
+                        File(photo.filePath),
+                        fit: BoxFit.contain,
+                        errorBuilder: (context, error, stackTrace) {
+                          return Center(
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                const Icon(Icons.image, size: 80, color: Color(0xFF39FF14)),
+                                const SizedBox(height: 12),
+                                Text(
+                                  photo.filePath,
+                                  textAlign: TextAlign.center,
+                                  style: const TextStyle(fontSize: 10, color: Colors.grey, fontFamily: 'JetBrains Mono'),
+                                )
+                              ],
+                            ),
+                          );
+                        },
                       ),
                     ),
                   ),
@@ -1827,14 +1787,11 @@ class VideoPlayerScreen extends StatefulWidget {
 }
 
 class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
+  late VideoPlayerController _controller;
+  bool _initialized = false;
   String _activeTab = "Extractive Summary";
   List<String> _summarySentences = [];
   bool _calculatingSummary = false;
-
-  // Video State emulation variables
-  bool _isPlaying = false;
-  int _currentTimeMs = 0;
-  Timer? _playbackTimer;
 
   // Scraped DB models for interactive lists
   List<AudioTranscriptIndex> _transcripts = [];
@@ -1843,45 +1800,48 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
   @override
   void initState() {
     super.initState();
-    _currentTimeMs = widget.activeFrame?.timestampMs ?? 0;
     _transcripts = DatabaseManager.getTranscriptsForVideo(widget.video.id);
     _frames = DatabaseManager.getFramesForVideo(widget.video.id);
     _computeSummary();
+    _initVideoPlayer();
+  }
+
+  Future<void> _initVideoPlayer() async {
+    _controller = VideoPlayerController.file(File(widget.video.filePath));
+    try {
+      await _controller.initialize();
+      setState(() {
+        _initialized = true;
+      });
+      if (widget.activeFrame != null) {
+        await _controller.seekTo(Duration(milliseconds: widget.activeFrame!.timestampMs));
+      }
+      _controller.addListener(() {
+        if (mounted) {
+          setState(() {});
+        }
+      });
+    } catch (e) {
+      debugPrint("Error initializing video player: $e");
+    }
   }
 
   @override
   void dispose() {
-    _playbackTimer?.cancel();
+    _controller.dispose();
     super.dispose();
   }
 
   void _togglePlayback() {
-    if (_isPlaying) {
-      _playbackTimer?.cancel();
-      setState(() {
-        _isPlaying = false;
-      });
+    if (_controller.value.isPlaying) {
+      _controller.pause();
     } else {
-      setState(() {
-        _isPlaying = true;
-      });
-      _playbackTimer = Timer.periodic(const Duration(milliseconds: 100), (timer) {
-        setState(() {
-          _currentTimeMs += 100;
-          if (_currentTimeMs >= widget.video.durationMs) {
-            _currentTimeMs = 0;
-            _isPlaying = false;
-            _playbackTimer?.cancel();
-          }
-        });
-      });
+      _controller.play();
     }
   }
 
   void _seekTo(int ms) {
-    setState(() {
-      _currentTimeMs = ms.clamp(0, widget.video.durationMs);
-    });
+    _controller.seekTo(Duration(milliseconds: ms));
   }
 
   void _computeSummary() async {
@@ -1921,6 +1881,115 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
     }
   }
 
+  void _reprocessVideo() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1C1B1B),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (context) {
+        String selectedDepth = "Full Summary";
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            return SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    const Text(
+                      "RE-PROCESS MEDIA PIPELINE",
+                      style: TextStyle(
+                        fontFamily: 'Sora',
+                        fontWeight: FontWeight.bold,
+                        fontSize: 16,
+                        color: Color(0xFF00F5FF),
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+                    const SizedBox(height: 16),
+                    ...["Frames Only", "Audio Only", "Full Summary"].map((depth) {
+                      final active = selectedDepth == depth;
+                      return ListTile(
+                        title: Text(depth, style: TextStyle(color: active ? const Color(0xFF00F5FF) : Colors.white)),
+                        trailing: active ? const Icon(Icons.check, color: Color(0xFF00F5FF)) : null,
+                        onTap: () {
+                          setModalState(() {
+                            selectedDepth = depth;
+                          });
+                        },
+                      );
+                    }).toList(),
+                    const SizedBox(height: 16),
+                    ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF39FF14),
+                        foregroundColor: Colors.black,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                      ),
+                      onPressed: () {
+                        Navigator.pop(context);
+                        _triggerPriorityProcess(selectedDepth);
+                      },
+                      child: const Text("TRIGGER PRIORITY RE-PROCESSING", style: TextStyle(fontFamily: 'JetBrains Mono', fontWeight: FontWeight.bold)),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Future<void> _triggerPriorityProcess(String depth) async {
+    if (Platform.isAndroid) {
+      await FlutterForegroundTask.startService(
+        serviceId: 256,
+        notificationTitle: 'Priority AI Process Active',
+        notificationText: 'Analyzing ${widget.video.fileName} with $depth',
+        callback: startCallback,
+      );
+    }
+
+    bool doFrames = depth == "Frames Only" || depth == "Full Summary";
+    bool doAudio = depth == "Audio Only" || depth == "Full Summary";
+
+    setState(() {
+      _calculatingSummary = true;
+    });
+
+    BackgroundWorker.startWorker(
+      widget.video.filePath,
+      processFrames: doFrames,
+      processAudio: doAudio,
+      processOcr: doFrames,
+      onProgress: (progress) {
+        if (!mounted) return;
+        if (progress.completed) {
+          if (Platform.isAndroid) {
+            FlutterForegroundTask.stopService();
+          }
+          setState(() {
+            _calculatingSummary = false;
+            _transcripts = DatabaseManager.getTranscriptsForVideo(widget.video.id);
+            _frames = DatabaseManager.getFramesForVideo(widget.video.id);
+            _computeSummary();
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              backgroundColor: Color(0xFF1C1B1B),
+              content: Text("Priority re-processing complete!", style: TextStyle(color: Color(0xFF39FF14), fontFamily: 'JetBrains Mono')),
+            ),
+          );
+        }
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     // Collect semantic query coordinates for timeline scrubber highlights
@@ -1940,10 +2009,20 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
       }
     }
 
+    final int currentMs = _initialized ? _controller.value.position.inMilliseconds : 0;
+    final int durationMs = _initialized ? _controller.value.duration.inMilliseconds : (widget.video.durationMs > 0 ? widget.video.durationMs : 1);
+
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.video.fileName, style: const TextStyle(fontFamily: 'Sora', fontWeight: FontWeight.bold)),
         backgroundColor: const Color(0xFF131313),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh, color: Color(0xFF39FF14)),
+            tooltip: "Re-Process Pipeline",
+            onPressed: _reprocessVideo,
+          ),
+        ],
       ),
       body: Column(
         children: [
@@ -1954,21 +2033,19 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
             child: Stack(
               children: [
                 Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      IconButton(
-                        icon: Icon(_isPlaying ? Icons.pause_circle_filled : Icons.play_circle_filled),
-                        iconSize: 64,
-                        color: const Color(0xFF00F5FF),
-                        onPressed: _togglePlayback,
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        "Playing index stream: ${_currentTimeMs ~/ 1000}s / ${widget.video.durationMs ~/ 1000}s",
-                        style: const TextStyle(fontFamily: 'JetBrains Mono', fontSize: 12),
-                      )
-                    ],
+                  child: _initialized
+                      ? AspectRatio(
+                          aspectRatio: _controller.value.aspectRatio,
+                          child: VideoPlayer(_controller),
+                        )
+                      : const CircularProgressIndicator(color: Color(0xFF00F5FF)),
+                ),
+                Center(
+                  child: IconButton(
+                    icon: Icon(_initialized && _controller.value.isPlaying ? Icons.pause_circle_filled : Icons.play_circle_filled),
+                    iconSize: 64,
+                    color: const Color(0xFF00F5FF).withOpacity(0.8),
+                    onPressed: _initialized ? _togglePlayback : null,
                   ),
                 ),
                 // Bounding boxes telemetry overlays matching nearest frame object detection
@@ -2012,7 +2089,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
                           final width = constraints.maxWidth;
                           return Stack(
                             children: queryMatchTimestamps.map((ms) {
-                              final double ratio = ms / widget.video.durationMs;
+                              final double ratio = ms / durationMs;
                               final double posX = ratio * (width - 24) + 12; // Adjusted padding
                               return Positioned(
                                 left: posX - 4,
@@ -2051,12 +2128,12 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
                         thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
                       ),
                       child: Slider(
-                        value: _currentTimeMs.toDouble(),
+                        value: currentMs.toDouble().clamp(0.0, durationMs.toDouble()),
                         min: 0.0,
-                        max: widget.video.durationMs.toDouble(),
-                        onChanged: (val) {
+                        max: durationMs.toDouble(),
+                        onChanged: _initialized ? (val) {
                           _seekTo(val.toInt());
-                        },
+                        } : null,
                       ),
                     ),
                   ],
@@ -2110,11 +2187,13 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
   }
 
   Widget _buildActiveTelemetryOverlay() {
+    if (!_initialized) return const SizedBox.shrink();
+    final int currentMs = _controller.value.position.inMilliseconds;
     // Fetch objects corresponding to current timestamp
     VideoFrameIndex? nearestFrame;
     int minDiff = 9999999;
     for (var f in _frames) {
-      final diff = (f.timestampMs - _currentTimeMs).abs();
+      final diff = (f.timestampMs - currentMs).abs();
       if (diff < minDiff && diff < 3000) {
         minDiff = diff;
         nearestFrame = f;
@@ -2182,6 +2261,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
       if (_transcripts.isEmpty) {
         return const Center(child: Text("No transcript indexed for this video.", style: TextStyle(color: Colors.grey)));
       }
+      final int currentMs = _initialized ? _controller.value.position.inMilliseconds : 0;
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -2192,7 +2272,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
               itemCount: _transcripts.length,
               itemBuilder: (context, idx) {
                 final t = _transcripts[idx];
-                final isCurrent = _currentTimeMs >= t.timestampStartMs && _currentTimeMs <= t.timestampEndMs;
+                final isCurrent = currentMs >= t.timestampStartMs && currentMs <= t.timestampEndMs;
                 return InkWell(
                   onTap: () {
                     _seekTo(t.timestampStartMs);
@@ -2290,6 +2370,32 @@ class _ControlSettingsScreenState extends State<ControlSettingsScreen> {
   double _ramCeiling = 1.2; // Memory budget default
 
   @override
+  void initState() {
+    super.initState();
+    DatabaseManager.loadWatchedDirectories().then((_) {
+      if (mounted) {
+        setState(() {});
+      }
+    });
+  }
+
+  Future<void> _pickDirectory() async {
+    try {
+      String? selectedDirectory = await FilePicker.getDirectoryPath();
+      if (selectedDirectory != null) {
+        if (Platform.isWindows) {
+          selectedDirectory = selectedDirectory.replaceAll('/', '\\');
+        }
+        setState(() {
+          DatabaseManager.addWatchedDirectory(selectedDirectory!);
+        });
+      }
+    } catch (e) {
+      debugPrint("Error picking directory: $e");
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
@@ -2346,6 +2452,75 @@ class _ControlSettingsScreenState extends State<ControlSettingsScreen> {
                 _bgProcessing = val;
               });
             },
+          ),
+          const Divider(),
+
+          const Text("WINDOWS WATCHED DIRECTORIES", style: TextStyle(fontFamily: 'JetBrains Mono', fontSize: 12, color: Color(0xFF00F5FF))),
+          const SizedBox(height: 12),
+          Card(
+            color: const Color(0xFF1C1B1B),
+            child: Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text("Where to look for:", style: TextStyle(fontFamily: 'Sora', fontSize: 14, fontWeight: FontWeight.bold)),
+                      ElevatedButton.icon(
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF00F5FF),
+                          foregroundColor: Colors.black,
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+                        ),
+                        onPressed: _pickDirectory,
+                        icon: const Icon(Icons.folder_open, size: 16),
+                        label: const Text("ADD FOLDER", style: TextStyle(fontFamily: 'JetBrains Mono', fontSize: 11, fontWeight: FontWeight.bold)),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  DatabaseManager.getWatchedDirectories().isEmpty
+                      ? const Padding(
+                          padding: EdgeInsets.symmetric(vertical: 20),
+                          child: Center(
+                            child: Text(
+                              "No watched directories configured.",
+                              style: TextStyle(fontFamily: 'Inter', fontSize: 12, color: Colors.grey),
+                            ),
+                          ),
+                        )
+                      : ListView.builder(
+                          shrinkWrap: true,
+                          physics: const NeverScrollableScrollPhysics(),
+                          itemCount: DatabaseManager.getWatchedDirectories().length,
+                          itemBuilder: (context, idx) {
+                            final path = DatabaseManager.getWatchedDirectories()[idx];
+                            return Card(
+                              color: const Color(0xFF131313),
+                              margin: const EdgeInsets.only(bottom: 8),
+                              child: ListTile(
+                                leading: const Icon(Icons.folder, color: Color(0xFF39FF14)),
+                                title: Text(
+                                  path,
+                                  style: const TextStyle(fontFamily: 'JetBrains Mono', fontSize: 11, color: Colors.white),
+                                ),
+                                trailing: IconButton(
+                                  icon: const Icon(Icons.delete, color: Colors.red),
+                                  onPressed: () {
+                                    setState(() {
+                                      DatabaseManager.removeWatchedDirectory(path);
+                                    });
+                                  },
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                ],
+              ),
+            ),
           ),
           const Divider(),
 
