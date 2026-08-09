@@ -92,10 +92,40 @@ class _ModelLoaderScreenState extends State<ModelLoaderScreen> {
   Future<void> _checkExistingFiles() async {
     try {
       final Directory appDir = await getApplicationDocumentsDirectory();
+      final List<String> searchDirs = [
+        appDir.path,
+        'local_models',
+        '../local_models',
+        Directory.current.path,
+        '${Directory.current.path}/local_models',
+      ];
+
       bool allExist = true;
       for (final fileName in _filesToDownload) {
-        final localFile = File('${appDir.path}/$fileName');
-        if (!await localFile.exists() || await localFile.length() == 0) {
+        bool found = false;
+
+        // Alias resolution for Optimum / PP-OCR filenames
+        List<String> candidates = [fileName];
+        if (fileName == 'whisper_tiny.onnx' || fileName == 'whisper.encoder') {
+          candidates.addAll(['encoder_model.onnx', 'whisper_tiny.onnx']);
+        } else if (fileName == 'whisper.decoder') {
+          candidates.addAll(['decoder_model.onnx', 'decoder_with_past_model.onnx']);
+        } else if (fileName == 'pp_ocr.onnx') {
+          candidates.addAll(['ppocr_rec_fp32.onnx', 'ppocr_det_fp32.onnx', 'pp_ocr.onnx', 'ppocr_rec_int8.onnx']);
+        }
+
+        for (final dirPath in searchDirs) {
+          for (final cand in candidates) {
+            final f = File('$dirPath/$cand');
+            if (await f.exists() && await f.length() > 0) {
+              found = true;
+              break;
+            }
+          }
+          if (found) break;
+        }
+
+        if (!found) {
           allExist = false;
           _fileStatus[fileName] = "Pending";
           _fileProgress[fileName] = 0.0;
@@ -109,11 +139,11 @@ class _ModelLoaderScreenState extends State<ModelLoaderScreen> {
         setState(() {
           _completed = true;
           _progress = 1.0;
-          _status = "All 6 ONNX engines verified locally. Ready to activate gallery.";
+          _status = "All ONNX engines verified locally. Ready to activate gallery.";
         });
       } else {
         setState(() {
-          _status = "Some heavy models are missing. Click DOWNLOAD MODELS to stream via MODEL_BASE_URL.";
+          _status = "Some models are missing. Place files in local_models or click LOCAL BYPASS.";
         });
       }
     } catch (e) {

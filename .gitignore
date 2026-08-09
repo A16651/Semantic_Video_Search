@@ -55,3 +55,14 @@ test_open.py
 test_inference.py
 media_core_ffi/.flutter-plugins-dependencies
 media_core_ffi/.dart_tool
+media_core_ffi/local_models/decoder_with_past_model.onnx
+media_core_ffi/local_models/decoder_model.onnx
+media_core_ffi/local_models/ppocr_det_fp32.onnx
+media_core_ffi/local_models/encoder_model.onnx
+media_core_ffi/local_models/ppocr_rec_fp32.onnx
+media_core_ffi/local_models/siglip.onnx
+.gitignore
+media_core_ffi/local_models/tokenizer.json
+media_core_ffi/media_core.dll
+media_core_ffi/media_core.dll
+media_core_ffi/native/media_core.dll
