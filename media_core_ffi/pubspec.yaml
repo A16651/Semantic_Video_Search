@@ -17,6 +17,9 @@ dependencies:
   photo_manager: ^3.11.0
   receive_sharing_intent: ^1.9.0
   flutter_foreground_task: ^10.0.0
+  permission_handler: ^13.0.0
+  file_picker: ^11.0.3
+  video_player: ^2.11.1
 
 dev_dependencies:
   flutter_test:

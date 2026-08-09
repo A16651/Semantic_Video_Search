@@ -1,4 +1,7 @@
 import 'dart:math';
+import 'dart:io';
+import 'dart:convert';
+import 'package:path_provider/path_provider.dart';
 
 // ObjectBox Relational & Vector entity mappings for on-device metadata.
 // Enforces exactly 512-dimension visual & textual vectors.
@@ -89,114 +92,7 @@ class DatabaseManager {
   static final List<AudioTranscriptIndex> _transcripts = [];
 
   static void initialize() {
-    // Inserts mock diagnostic seed data to prevent visual rendering placeholders
-    if (_videos.isEmpty && _photos.isEmpty) {
-      _videos.addAll([
-        IndexedVideo(
-          id: 1,
-          filePath: '/storage/emulated/0/Movies/Hiking_In_Swiss_Alps.mp4',
-          fileName: 'Hiking_In_Swiss_Alps.mp4',
-          durationMs: 45000,
-          sizeBytes: 154201931,
-          indexedTime: DateTime.now().subtract(const Duration(days: 5)),
-        ),
-        IndexedVideo(
-          id: 2,
-          filePath: '/storage/emulated/0/Movies/Family_Dinner_Birthday.mp4',
-          fileName: 'Family_Dinner_Birthday.mp4',
-          durationMs: 120000,
-          sizeBytes: 450122107,
-          indexedTime: DateTime.now().subtract(const Duration(days: 12)),
-        ),
-        IndexedVideo(
-          id: 3,
-          filePath: '/storage/emulated/0/Movies/Drone_Cinematic_Coastline.mp4',
-          fileName: 'Drone_Cinematic_Coastline.mp4',
-          durationMs: 30000,
-          sizeBytes: 98122107,
-          indexedTime: DateTime.now().subtract(const Duration(days: 20)),
-        ),
-      ]);
-
-      final rand = Random(42);
-
-      _photos.addAll([
-        IndexedPhoto(
-          id: 101,
-          filePath: '/storage/emulated/0/DCIM/Camera/IMG_Mountain_View.jpg',
-          fileName: 'IMG_Mountain_View.jpg',
-          sizeBytes: 3410291,
-          indexedTime: DateTime.now().subtract(const Duration(hours: 4)),
-          embedding512: List<double>.generate(512, (_) => rand.nextDouble() * 2 - 1),
-          detectedObjects: '["mountain", "sky", "snow"]',
-        ),
-        IndexedPhoto(
-          id: 102,
-          filePath: '/storage/emulated/0/DCIM/Camera/IMG_Lasagna_Cooking.jpg',
-          fileName: 'IMG_Lasagna_Cooking.jpg',
-          sizeBytes: 2102911,
-          indexedTime: DateTime.now().subtract(const Duration(days: 2)),
-          embedding512: List<double>.generate(512, (_) => rand.nextDouble() * 2 - 1),
-          detectedObjects: '["food", "lasagna", "plate", "kitchen"]',
-        ),
-        IndexedPhoto(
-          id: 103,
-          filePath: '/storage/emulated/0/DCIM/Camera/IMG_Drone_Remote.jpg',
-          fileName: 'IMG_Drone_Remote.jpg',
-          sizeBytes: 1849102,
-          indexedTime: DateTime.now().subtract(const Duration(days: 6)),
-          embedding512: List<double>.generate(512, (_) => rand.nextDouble() * 2 - 1),
-          detectedObjects: '["remote", "drone", "hand", "beach"]',
-        ),
-      ]);
-
-      // Seed Frame indexes (512 dimensions)
-      for (var v in _videos) {
-        for (int ms = 1000; ms < v.durationMs; ms += 5000) {
-          _frames.add(VideoFrameIndex(
-            videoId: v.id,
-            timestampMs: ms,
-            embedding512: List<double>.generate(512, (_) => rand.nextDouble() * 2 - 1),
-            detectedObjects: v.id == 1
-                ? '["person", "backpack", "tree", "mountain"]'
-                : (v.id == 2 ? '["lasagna", "family", "birthday", "cake"]' : '["sea", "coastline", "drone", "wave"]'),
-            detectedFaces: '[]',
-          ));
-        }
-      }
-
-      // Seed Transcripts
-      _transcripts.addAll([
-        AudioTranscriptIndex(
-          videoId: 1,
-          timestampStartMs: 2000,
-          timestampEndMs: 8000,
-          sentence: "Look at those incredible peaks over there, the snow is fully covering the summit.",
-          textEmbedding512: List<double>.generate(512, (_) => rand.nextDouble() * 2 - 1),
-        ),
-        AudioTranscriptIndex(
-          videoId: 1,
-          timestampStartMs: 15000,
-          timestampEndMs: 22000,
-          sentence: "We are hiking higher up, the pathway is getting quite steep but the view is worth it.",
-          textEmbedding512: List<double>.generate(512, (_) => rand.nextDouble() * 2 - 1),
-        ),
-        AudioTranscriptIndex(
-          videoId: 2,
-          timestampStartMs: 1000,
-          timestampEndMs: 7000,
-          sentence: "Happy Birthday to you, blow out all the candles and make a great wish!",
-          textEmbedding512: List<double>.generate(512, (_) => rand.nextDouble() * 2 - 1),
-        ),
-        AudioTranscriptIndex(
-          videoId: 2,
-          timestampStartMs: 35000,
-          timestampEndMs: 42000,
-          sentence: "Pass the delicious lasagna over here, dad is carving the chocolate cake now.",
-          textEmbedding512: List<double>.generate(512, (_) => rand.nextDouble() * 2 - 1),
-        ),
-      ]);
-    }
+    // Purged all mock diagnostic seed data for clean first-launch and no-mock-data guarantee.
   }
 
   static List<IndexedVideo> getAllVideos() {
@@ -329,5 +225,48 @@ class DatabaseManager {
 
     hits.sort((a, b) => b['score'].compareTo(a['score']));
     return hits;
+  }
+
+  static final List<String> _watchedDirectories = [];
+
+  static Future<void> loadWatchedDirectories() async {
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final file = File('${dir.path}/watched_directories.json');
+      if (await file.exists()) {
+        final content = await file.readAsString();
+        final List<dynamic> list = jsonDecode(content);
+        _watchedDirectories.clear();
+        _watchedDirectories.addAll(list.cast<String>());
+      }
+    } catch (e) {
+      // Gracefully handle or log
+    }
+  }
+
+  static Future<void> saveWatchedDirectories() async {
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final file = File('${dir.path}/watched_directories.json');
+      await file.writeAsString(jsonEncode(_watchedDirectories));
+    } catch (e) {
+      // Gracefully handle or log
+    }
+  }
+
+  static List<String> getWatchedDirectories() {
+    return _watchedDirectories;
+  }
+
+  static void addWatchedDirectory(String path) {
+    if (!_watchedDirectories.contains(path)) {
+      _watchedDirectories.add(path);
+      saveWatchedDirectories();
+    }
+  }
+
+  static void removeWatchedDirectory(String path) {
+    _watchedDirectories.remove(path);
+    saveWatchedDirectories();
   }
 }
