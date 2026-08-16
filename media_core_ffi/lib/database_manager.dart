@@ -1,10 +1,12 @@
 import 'dart:math';
 import 'dart:io';
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
-// ObjectBox Relational & Vector entity mappings for on-device metadata.
-// Enforces exactly 512-dimension visual & textual vectors.
+// Relational & Vector entity mappings for on-device metadata.
+// Enforces exactly 512-dimension visual & textual vectors with disk serialization.
+
 class IndexedVideo {
   int id;
   String filePath;
@@ -12,6 +14,7 @@ class IndexedVideo {
   int durationMs;
   int sizeBytes;
   DateTime indexedTime;
+  String thumbnailPath;
 
   IndexedVideo({
     this.id = 0,
@@ -20,7 +23,28 @@ class IndexedVideo {
     required this.durationMs,
     required this.sizeBytes,
     required this.indexedTime,
+    this.thumbnailPath = '',
   });
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'filePath': filePath,
+        'fileName': fileName,
+        'durationMs': durationMs,
+        'sizeBytes': sizeBytes,
+        'indexedTime': indexedTime.toIso8601String(),
+        'thumbnailPath': thumbnailPath,
+      };
+
+  factory IndexedVideo.fromJson(Map<String, dynamic> json) => IndexedVideo(
+        id: json['id'] ?? 0,
+        filePath: json['filePath'] ?? '',
+        fileName: json['fileName'] ?? '',
+        durationMs: json['durationMs'] ?? 0,
+        sizeBytes: json['sizeBytes'] ?? 0,
+        indexedTime: DateTime.tryParse(json['indexedTime'] ?? '') ?? DateTime.now(),
+        thumbnailPath: json['thumbnailPath'] ?? '',
+      );
 }
 
 class IndexedPhoto {
@@ -29,7 +53,7 @@ class IndexedPhoto {
   String fileName;
   int sizeBytes;
   DateTime indexedTime;
-  List<double> embedding512; // Enforced to 512 dimensions for ObjectBox KNN indexes
+  List<double> embedding512; // Enforced to 512 dimensions for KNN indexes
   String detectedObjects; // JSON-serialized tracking labels
 
   IndexedPhoto({
@@ -43,15 +67,37 @@ class IndexedPhoto {
   }) {
     assert(embedding512.length == 512, "Visual database photo vectors must be strictly mapped to 512 dimensions.");
   }
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'filePath': filePath,
+        'fileName': fileName,
+        'sizeBytes': sizeBytes,
+        'indexedTime': indexedTime.toIso8601String(),
+        'embedding512': embedding512,
+        'detectedObjects': detectedObjects,
+      };
+
+  factory IndexedPhoto.fromJson(Map<String, dynamic> json) => IndexedPhoto(
+        id: json['id'] ?? 0,
+        filePath: json['filePath'] ?? '',
+        fileName: json['fileName'] ?? '',
+        sizeBytes: json['sizeBytes'] ?? 0,
+        indexedTime: DateTime.tryParse(json['indexedTime'] ?? '') ?? DateTime.now(),
+        embedding512: (json['embedding512'] as List<dynamic>?)?.map((e) => (e as num).toDouble()).toList() ??
+            List<double>.filled(512, 0.0),
+        detectedObjects: json['detectedObjects'] ?? '[]',
+      );
 }
 
 class VideoFrameIndex {
   int id;
   int videoId;
   int timestampMs;
-  List<double> embedding512; // Enforced to 512 dimensions for ObjectBox KNN indexes
+  List<double> embedding512; // Enforced to 512 dimensions for KNN indexes
   String detectedObjects; // JSON-serialized tracking labels
   String detectedFaces; // JSON-serialized face vectors/names
+  String ocrText; // Real PP-OCR extracted text strings
 
   VideoFrameIndex({
     this.id = 0,
@@ -60,9 +106,31 @@ class VideoFrameIndex {
     required this.embedding512,
     this.detectedObjects = '[]',
     this.detectedFaces = '[]',
+    this.ocrText = '',
   }) {
     assert(embedding512.length == 512, "Visual database vectors must be strictly mapped to 512 dimensions.");
   }
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'videoId': videoId,
+        'timestampMs': timestampMs,
+        'embedding512': embedding512,
+        'detectedObjects': detectedObjects,
+        'detectedFaces': detectedFaces,
+        'ocrText': ocrText,
+      };
+
+  factory VideoFrameIndex.fromJson(Map<String, dynamic> json) => VideoFrameIndex(
+        id: json['id'] ?? 0,
+        videoId: json['videoId'] ?? 0,
+        timestampMs: json['timestampMs'] ?? 0,
+        embedding512: (json['embedding512'] as List<dynamic>?)?.map((e) => (e as num).toDouble()).toList() ??
+            List<double>.filled(512, 0.0),
+        detectedObjects: json['detectedObjects'] ?? '[]',
+        detectedFaces: json['detectedFaces'] ?? '[]',
+        ocrText: json['ocrText'] ?? '',
+      );
 }
 
 class AudioTranscriptIndex {
@@ -83,6 +151,25 @@ class AudioTranscriptIndex {
   }) {
     assert(textEmbedding512.length == 512, "Text transcript vector must be strictly mapped to 512 dimensions.");
   }
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'videoId': videoId,
+        'timestampStartMs': timestampStartMs,
+        'timestampEndMs': timestampEndMs,
+        'sentence': sentence,
+        'textEmbedding512': textEmbedding512,
+      };
+
+  factory AudioTranscriptIndex.fromJson(Map<String, dynamic> json) => AudioTranscriptIndex(
+        id: json['id'] ?? 0,
+        videoId: json['videoId'] ?? 0,
+        timestampStartMs: json['timestampStartMs'] ?? 0,
+        timestampEndMs: json['timestampEndMs'] ?? 0,
+        sentence: json['sentence'] ?? '',
+        textEmbedding512: (json['textEmbedding512'] as List<dynamic>?)?.map((e) => (e as num).toDouble()).toList() ??
+            List<double>.filled(512, 0.0),
+      );
 }
 
 class DatabaseManager {
@@ -90,55 +177,152 @@ class DatabaseManager {
   static final List<IndexedPhoto> _photos = [];
   static final List<VideoFrameIndex> _frames = [];
   static final List<AudioTranscriptIndex> _transcripts = [];
+  static bool _initialized = false;
 
-  static void initialize() {
-    // Purged all mock diagnostic seed data for clean first-launch and no-mock-data guarantee.
+  static void dbLog(String message) {
+    if (kDebugMode) {
+      print("[DatabaseManager] $message");
+    }
+  }
+
+  static Future<void> initialize() async {
+    if (_initialized) return;
+    _initialized = true;
+    dbLog("Initializing DatabaseManager and loading persisted state from disk...");
+    await loadDatabaseFromDisk();
+  }
+
+  static Future<void> loadDatabaseFromDisk() async {
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final dbFile = File('${dir.path}/app_database_v1.json');
+      dbLog("Reading persistent database file: ${dbFile.path}");
+
+      if (await dbFile.exists()) {
+        final String content = await dbFile.readAsString();
+        final Map<String, dynamic> json = jsonDecode(content);
+
+        _videos.clear();
+        _photos.clear();
+        _frames.clear();
+        _transcripts.clear();
+
+        if (json.containsKey('videos')) {
+          for (var item in json['videos']) {
+            _videos.add(IndexedVideo.fromJson(item));
+          }
+        }
+        if (json.containsKey('photos')) {
+          for (var item in json['photos']) {
+            _photos.add(IndexedPhoto.fromJson(item));
+          }
+        }
+        if (json.containsKey('frames')) {
+          for (var item in json['frames']) {
+            _frames.add(VideoFrameIndex.fromJson(item));
+          }
+        }
+        if (json.containsKey('transcripts')) {
+          for (var item in json['transcripts']) {
+            _transcripts.add(AudioTranscriptIndex.fromJson(item));
+          }
+        }
+
+        dbLog("Successfully restored from disk: ${_videos.length} videos, ${_photos.length} photos, ${_frames.length} frames, ${_transcripts.length} transcripts.");
+      } else {
+        dbLog("No existing database file found on disk. Initialized empty database.");
+      }
+    } catch (e, st) {
+      dbLog("Error loading database from disk: $e\n$st");
+    }
+  }
+
+  static Future<void> saveDatabaseToDisk() async {
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final dbFile = File('${dir.path}/app_database_v1.json');
+      dbLog("Saving database state to disk: ${_videos.length} videos, ${_photos.length} photos, ${_frames.length} frames, ${_transcripts.length} transcripts...");
+
+      final Map<String, dynamic> data = {
+        'videos': _videos.map((v) => v.toJson()).toList(),
+        'photos': _photos.map((p) => p.toJson()).toList(),
+        'frames': _frames.map((f) => f.toJson()).toList(),
+        'transcripts': _transcripts.map((t) => t.toJson()).toList(),
+      };
+
+      await dbFile.writeAsString(jsonEncode(data));
+      dbLog("Database saved to disk successfully at ${dbFile.path}");
+    } catch (e, st) {
+      dbLog("Error saving database to disk: $e\n$st");
+    }
   }
 
   static List<IndexedVideo> getAllVideos() {
-    initialize();
     return _videos;
   }
 
   static List<IndexedPhoto> getAllPhotos() {
-    initialize();
     return _photos;
   }
 
   static void addVideo(IndexedVideo video) {
-    _videos.add(video);
+    if (!_videos.any((v) => v.id == video.id || v.filePath == video.filePath)) {
+      _videos.add(video);
+      dbLog("Added video: id=${video.id}, path=${video.filePath}. Total videos: ${_videos.length}");
+      saveDatabaseToDisk();
+    }
   }
 
   static void addPhoto(IndexedPhoto photo) {
-    _photos.add(photo);
+    if (!_photos.any((p) => p.id == photo.id || p.filePath == photo.filePath)) {
+      _photos.add(photo);
+      dbLog("Added photo: id=${photo.id}, path=${photo.filePath}. Total photos: ${_photos.length}");
+      saveDatabaseToDisk();
+    }
+  }
+
+  static void clearVideoData(int videoId) {
+    dbLog("Clearing existing frames and transcripts for videoId=$videoId");
+    _frames.removeWhere((f) => f.videoId == videoId);
+    _transcripts.removeWhere((t) => t.videoId == videoId);
+    saveDatabaseToDisk();
   }
 
   static void addFrame(VideoFrameIndex frame) {
+    _frames.removeWhere((f) => f.videoId == frame.videoId && f.timestampMs == frame.timestampMs);
     _frames.add(frame);
+    dbLog("Added VideoFrameIndex for video ${frame.videoId} at ${frame.timestampMs}ms (ocr: '${frame.ocrText}'). Total frames: ${_frames.length}");
+    saveDatabaseToDisk();
   }
 
   static void addTranscript(AudioTranscriptIndex transcript) {
+    _transcripts.removeWhere((t) =>
+        t.videoId == transcript.videoId &&
+        t.timestampStartMs == transcript.timestampStartMs &&
+        t.timestampEndMs == transcript.timestampEndMs);
     _transcripts.add(transcript);
+    dbLog("Added AudioTranscriptIndex for video ${transcript.videoId} [${transcript.timestampStartMs}-${transcript.timestampEndMs}ms]: '${transcript.sentence}'. Total transcripts: ${_transcripts.length}");
+    saveDatabaseToDisk();
   }
 
   static List<AudioTranscriptIndex> getTranscriptsForVideo(int videoId) {
-    initialize();
-    return _transcripts.where((t) => t.videoId == videoId).toList();
+    final list = _transcripts.where((t) => t.videoId == videoId).toList();
+    list.sort((a, b) => a.timestampStartMs.compareTo(b.timestampStartMs));
+    return list;
   }
 
   static List<VideoFrameIndex> getFramesForVideo(int videoId) {
-    initialize();
-    return _frames.where((f) => f.videoId == videoId).toList();
+    final list = _frames.where((f) => f.videoId == videoId).toList();
+    list.sort((a, b) => a.timestampMs.compareTo(b.timestampMs));
+    return list;
   }
 
-  // Purely offline Cosine/KNN search based on target text query across BOTH photos and video frames (standardized at 512 dimensions)
   static List<Map<String, dynamic>> searchVisualSemantic(List<double> queryVector, {double minConfidence = 0.15}) {
-    initialize();
-    assert(queryVector.length == 512, "Query vectors for offline ObjectBox similarity matching must be exactly 512 dimensions.");
+    assert(queryVector.length == 512, "Query vectors for similarity matching must be exactly 512 dimensions.");
+    dbLog("Performing visual semantic similarity search across ${_frames.length} frames and ${_photos.length} photos...");
 
     final List<Map<String, dynamic>> hits = [];
 
-    // 1. Search across Video Frames
     for (var f in _frames) {
       double dotProduct = 0.0;
       double normA = 0.0;
@@ -153,7 +337,7 @@ class DatabaseManager {
         score = dotProduct / (sqrt(normA) * sqrt(normB));
       }
 
-      if (score >= minConfidence) {
+      if (score >= minConfidence && _videos.any((v) => v.id == f.videoId)) {
         final video = _videos.firstWhere((v) => v.id == f.videoId);
         hits.add({
           'type': 'video',
@@ -164,7 +348,6 @@ class DatabaseManager {
       }
     }
 
-    // 2. Search across Photos
     for (var p in _photos) {
       double dotProduct = 0.0;
       double normA = 0.0;
@@ -188,14 +371,14 @@ class DatabaseManager {
       }
     }
 
-    hits.sort((a, b) => b['score'].compareTo(a['score']));
+    hits.sort((a, b) => (b['score'] as double).compareTo(a['score'] as double));
+    dbLog("Visual semantic search returned ${hits.length} matching hits.");
     return hits;
   }
 
-  // Offline text-based transcript similarity matching (cosine similarity)
   static List<Map<String, dynamic>> searchAudioSemantic(List<double> queryVector, {double minConfidence = 0.15}) {
-    initialize();
-    assert(queryVector.length == 512, "Query vectors for offline ObjectBox similarity matching must be exactly 512 dimensions.");
+    assert(queryVector.length == 512, "Query vectors for similarity matching must be exactly 512 dimensions.");
+    dbLog("Performing audio transcript similarity search across ${_transcripts.length} transcripts...");
 
     final List<Map<String, dynamic>> hits = [];
 
@@ -213,7 +396,7 @@ class DatabaseManager {
         score = dotProduct / (sqrt(normA) * sqrt(normB));
       }
 
-      if (score >= minConfidence) {
+      if (score >= minConfidence && _videos.any((v) => v.id == t.videoId)) {
         final video = _videos.firstWhere((v) => v.id == t.videoId);
         hits.add({
           'video': video,
@@ -223,7 +406,8 @@ class DatabaseManager {
       }
     }
 
-    hits.sort((a, b) => b['score'].compareTo(a['score']));
+    hits.sort((a, b) => (b['score'] as double).compareTo(a['score'] as double));
+    dbLog("Audio transcript search returned ${hits.length} matching hits.");
     return hits;
   }
 
@@ -238,9 +422,10 @@ class DatabaseManager {
         final List<dynamic> list = jsonDecode(content);
         _watchedDirectories.clear();
         _watchedDirectories.addAll(list.cast<String>());
+        dbLog("Loaded ${_watchedDirectories.length} watched directories from disk.");
       }
     } catch (e) {
-      // Gracefully handle or log
+      dbLog("Error loading watched directories: $e");
     }
   }
 
@@ -249,8 +434,9 @@ class DatabaseManager {
       final dir = await getApplicationDocumentsDirectory();
       final file = File('${dir.path}/watched_directories.json');
       await file.writeAsString(jsonEncode(_watchedDirectories));
+      dbLog("Saved ${_watchedDirectories.length} watched directories to disk.");
     } catch (e) {
-      // Gracefully handle or log
+      dbLog("Error saving watched directories: $e");
     }
   }
 

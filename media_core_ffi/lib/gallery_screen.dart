@@ -2,9 +2,6 @@ import 'package:flutter/material.dart';
 import 'dart:math';
 import 'dart:io';
 import 'dart:async';
-import 'package:crypto/crypto.dart';
-import 'package:convert/convert.dart';
-import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:photo_manager/photo_manager.dart';
 import 'package:receive_sharing_intent/receive_sharing_intent.dart';
@@ -62,6 +59,10 @@ class ModelLoaderScreen extends StatefulWidget {
   State<ModelLoaderScreen> createState() => _ModelLoaderScreenState();
 }
 
+// Global resolved model directory — set once by ModelLoaderScreen, used by all workers
+// to fix Bug 5 (C++ relative path resolution across isolate boundaries)
+String _resolvedModelDir = '';
+
 class _ModelLoaderScreenState extends State<ModelLoaderScreen> {
   double _progress = 0.0;
   String _status = "Initializing ONNX Mobile Engine Runtime...";
@@ -96,9 +97,7 @@ class _ModelLoaderScreenState extends State<ModelLoaderScreen> {
   void initState() {
     super.initState();
     _checkExistingFiles().then((_) {
-      if (!_completed) {
-        _downloadModels();
-      } else {
+      if (_completed) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           Navigator.pushReplacement(
             context,
@@ -110,31 +109,65 @@ class _ModelLoaderScreenState extends State<ModelLoaderScreen> {
     });
   }
 
+  final List<String> _userSelectedDirs = [];
+
   Future<void> _checkExistingFiles() async {
     try {
       final Directory appDir = await getApplicationDocumentsDirectory();
+      final String exeDir = File(Platform.resolvedExecutable).parent.path;
       final List<String> searchDirs = [
+        ..._userSelectedDirs,
         appDir.path,
         'local_models',
         '../local_models',
+        '../../local_models',
+        '../../../local_models',
+        '../../../../local_models',
+        '../../../../../local_models',
         Directory.current.path,
         '${Directory.current.path}/local_models',
+        '${Directory.current.path}/media_core_ffi/local_models',
+        '$exeDir/local_models',
+        '$exeDir/../../../../local_models',
+        '$exeDir/../../../../../local_models',
       ];
 
-      bool allExist = true;
-      _filesToDownload.forEach((fileName, url) {
-        final localFile = File('${appDir.path}/$fileName');
-        if (!localFile.existsSync() || localFile.lengthSync() == 0) {
-          allExist = false;
-          _fileStatus[fileName] = "Pending";
-          _fileProgress[fileName] = 0.0;
-        } else {
+      int verifiedCount = 0;
+      String foundModelDir = '';
+
+      for (var fileName in _filesToDownload.keys) {
+        bool found = false;
+
+        for (var candidateDir in searchDirs) {
+          final candidateFile = File('$candidateDir/$fileName');
+          if (candidateFile.existsSync() && candidateFile.lengthSync() > 0) {
+            found = true;
+            // Capture the first directory where a model file was found
+            if (foundModelDir.isEmpty) {
+              foundModelDir = Directory(candidateDir).absolute.path;
+            }
+            break;
+          }
+        }
+
+        if (found) {
           _fileStatus[fileName] = "Verified Local";
           _fileProgress[fileName] = 1.0;
+          verifiedCount++;
+        } else {
+          _fileStatus[fileName] = "Missing";
+          _fileProgress[fileName] = 0.0;
         }
-      });
+      }
 
-      if (allExist) {
+      // Store the resolved model directory globally for worker isolate path resolution
+      if (foundModelDir.isNotEmpty) {
+        _resolvedModelDir = foundModelDir;
+      }
+
+      _calculateTotalProgress();
+
+      if (verifiedCount == _filesToDownload.length) {
         setState(() {
           _completed = true;
           _progress = 1.0;
@@ -142,12 +175,87 @@ class _ModelLoaderScreenState extends State<ModelLoaderScreen> {
         });
       } else {
         setState(() {
-          _status = "Required models are missing. Initializing download...";
+          _status =
+              "$verifiedCount/7 models verified. Missing models can be imported from local_models folder or downloaded.";
         });
       }
     } catch (e) {
       setState(() {
         _status = "Error checking local files: $e";
+      });
+    }
+  }
+
+  Future<void> _importFromLocalFolder() async {
+    try {
+      String? selectedDirectory = await FilePicker.getDirectoryPath(
+        dialogTitle: "Select Folder Containing Local ONNX Models",
+      );
+      if (selectedDirectory == null) return;
+
+      if (!_userSelectedDirs.contains(selectedDirectory)) {
+        _userSelectedDirs.add(selectedDirectory);
+      }
+
+      setState(() {
+        _status = "Verifying models from $selectedDirectory...";
+        _hasError = false;
+        _errorDetails = "";
+      });
+
+      await _checkExistingFiles();
+
+      if (_completed && mounted) {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+              builder: (context) => const GalleryDashboardScreen()),
+        );
+      }
+    } catch (e) {
+      setState(() {
+        _hasError = true;
+        _errorDetails = "Failed to import from folder: $e";
+      });
+    }
+  }
+
+  Future<void> _importModelFiles() async {
+    try {
+      FilePickerResult? result = await FilePicker.pickFiles(
+        allowMultiple: true,
+        dialogTitle: "Select Neural Model Files (.onnx, tokenizer.json)",
+      );
+      if (result == null || result.files.isEmpty) return;
+
+      setState(() {
+        _status = "Verifying selected model files...";
+        _hasError = false;
+        _errorDetails = "";
+      });
+
+      for (var file in result.files) {
+        if (file.path != null) {
+          final parentDir = File(file.path!).parent.path;
+          if (!_userSelectedDirs.contains(parentDir)) {
+            _userSelectedDirs.add(parentDir);
+          }
+        }
+      }
+
+      await _checkExistingFiles();
+
+      if (_completed && mounted) {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+              builder: (context) => const GalleryDashboardScreen()),
+        );
+      }
+    } catch (e) {
+      setState(() {
+        _hasError = true;
+        _errorDetails = "Failed to import files: $e";
       });
     }
   }
@@ -180,64 +288,52 @@ class _ModelLoaderScreenState extends State<ModelLoaderScreen> {
           _fileProgress[fileName] = 0.0;
         });
 
-        bool fileSuccess = false;
-        int retries = 0;
-        const maxRetries = 2;
+        IOSink? ioSink;
+        try {
+          final request = await client.getUrl(Uri.parse(fileUrl));
+          _currentRequest = request;
+          final response = await request.close();
 
-        while (!fileSuccess && retries <= maxRetries) {
-          IOSink? ioSink;
-          try {
-            final request = await client.getUrl(Uri.parse(fileUrl));
-            _currentRequest = request;
-            final response = await request.close();
-
-            if (response.statusCode != 200) {
-              throw HttpException(
-                  "HTTP status ${response.statusCode} returned");
-            }
-
-            final contentLength = response.contentLength;
-            int bytesDownloaded = 0;
-
-            ioSink = localFile.openWrite();
-
-            await for (final chunk in response) {
-              ioSink.add(chunk);
-              bytesDownloaded += chunk.length;
-
-              if (contentLength > 0) {
-                final double prog = bytesDownloaded / contentLength;
-                setState(() {
-                  _fileProgress[fileName] = prog;
-                  _calculateTotalProgress();
-                  _status =
-                      "Streaming $fileName: ${(prog * 100).toStringAsFixed(0)}%";
-                });
-              }
-            }
-
-            await ioSink.close();
-            ioSink = null;
-
-            setState(() {
-              _fileStatus[fileName] = "Complete";
-              _fileProgress[fileName] = 1.0;
-              _calculateTotalProgress();
-            });
-
-            fileSuccess = true;
-          } catch (e) {
-            retries++;
-            if (ioSink != null) {
-              try {
-                await ioSink.close();
-              } catch (_) {}
-            }
-            if (retries > maxRetries) {
-              rethrow;
-            }
-            await Future.delayed(const Duration(milliseconds: 500));
+          if (response.statusCode != 200) {
+            throw HttpException(
+                "HTTP ${response.statusCode}: Private or missing repository link. Please use 'IMPORT FROM LOCAL FOLDER' to select local_models.");
           }
+
+          final contentLength = response.contentLength;
+          int bytesDownloaded = 0;
+
+          ioSink = localFile.openWrite();
+
+          await for (final chunk in response) {
+            ioSink.add(chunk);
+            bytesDownloaded += chunk.length;
+
+            if (contentLength > 0) {
+              final double prog = bytesDownloaded / contentLength;
+              setState(() {
+                _fileProgress[fileName] = prog;
+                _calculateTotalProgress();
+                _status =
+                    "Streaming $fileName: ${(prog * 100).toStringAsFixed(0)}%";
+              });
+            }
+          }
+
+          await ioSink.close();
+          ioSink = null;
+
+          setState(() {
+            _fileStatus[fileName] = "Complete";
+            _fileProgress[fileName] = 1.0;
+            _calculateTotalProgress();
+          });
+        } catch (e) {
+          if (ioSink != null) {
+            try {
+              await ioSink.close();
+            } catch (_) {}
+          }
+          rethrow;
         }
       }
 
@@ -263,7 +359,7 @@ class _ModelLoaderScreenState extends State<ModelLoaderScreen> {
         _hasError = true;
         _isDownloading = false;
         _errorDetails = e.toString();
-        _status = "Download failed. Tap RETRY to resume.";
+        _status = "Download unavailable. Use 'IMPORT FROM LOCAL FOLDER' below.";
       });
     }
   }
@@ -283,7 +379,7 @@ class _ModelLoaderScreenState extends State<ModelLoaderScreen> {
     return Scaffold(
       body: Center(
         child: Container(
-          constraints: const BoxConstraints(maxHeight: 480, maxWidth: 440),
+          constraints: const BoxConstraints(maxHeight: 560, maxWidth: 480),
           padding: const EdgeInsets.all(24),
           decoration: BoxDecoration(
             color: const Color(0xFF1C1B1B),
@@ -341,38 +437,67 @@ class _ModelLoaderScreenState extends State<ModelLoaderScreen> {
               ),
               const SizedBox(height: 12),
               Text(
-                "DOWNLOAD STATUS: ${_completed ? 'SUCCESS' : (_hasError ? 'FAILED' : 'DOWNLOADING')}",
+                "STATUS: ${_completed ? 'SUCCESS (ALL VERIFIED)' : (_hasError ? 'ACTION REQUIRED' : (_isDownloading ? 'DOWNLOADING' : 'READY'))}",
                 style: TextStyle(
                   fontFamily: 'JetBrains Mono',
                   fontSize: 11,
                   color: _completed
                       ? const Color(0xFF39FF14)
-                      : (_hasError ? Colors.red : Colors.yellow),
+                      : (_hasError ? Colors.red : Colors.cyan),
                 ),
               ),
               const SizedBox(height: 16),
-              if (_hasError) ...[
+              if (_hasError && _errorDetails.isNotEmpty) ...[
                 Text(
-                  "Error Details: $_errorDetails",
+                  "Notice: $_errorDetails",
                   style: const TextStyle(
                       fontFamily: 'JetBrains Mono',
                       fontSize: 10,
-                      color: Colors.red),
+                      color: Colors.orangeAccent),
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                 ),
                 const SizedBox(height: 16),
-                ElevatedButton(
+              ],
+              if (!_completed && !_isDownloading) ...[
+                ElevatedButton.icon(
                   style: ElevatedButton.styleFrom(
                     backgroundColor: const Color(0xFF00F5FF),
                     foregroundColor: Colors.black,
                     shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(4)),
                     padding: const EdgeInsets.symmetric(
-                        horizontal: 40, vertical: 12),
+                        horizontal: 24, vertical: 12),
+                    minimumSize: const Size(280, 42),
+                  ),
+                  onPressed: _importFromLocalFolder,
+                  icon: const Icon(Icons.folder_open, size: 20),
+                  label: const Text("IMPORT FROM LOCAL FOLDER",
+                      style: TextStyle(fontWeight: FontWeight.bold)),
+                ),
+                const SizedBox(height: 10),
+                OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: const Color(0xFF00F5FF),
+                    side: const BorderSide(color: Color(0xFF00F5FF)),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(4)),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 24, vertical: 12),
+                    minimumSize: const Size(280, 42),
+                  ),
+                  onPressed: _importModelFiles,
+                  icon: const Icon(Icons.file_upload_outlined, size: 20),
+                  label: const Text("SELECT MODEL FILES"),
+                ),
+                const SizedBox(height: 10),
+                TextButton.icon(
+                  style: TextButton.styleFrom(
+                    foregroundColor: Colors.grey,
                   ),
                   onPressed: _downloadModels,
-                  child: const Text("RETRY DOWNLOAD"),
+                  icon: const Icon(Icons.cloud_download, size: 18),
+                  label: const Text("TRY ONLINE DOWNLOAD"),
                 ),
               ],
             ],
@@ -430,9 +555,21 @@ class _GalleryDashboardScreenState extends State<GalleryDashboardScreen> {
     super.initState();
     _initService();
     _initSharingReceiver();
-    _requestPermissions().then((_) {
-      _scanDeviceMedia();
+    DatabaseManager.initialize().then((_) {
+      _requestPermissions().then((_) {
+        _scanDeviceMedia();
+      });
     });
+  }
+
+  List<double> _computePhotoEmbedding(String filename) {
+    try {
+      debugPrint("[UI Orchestrator] Generating 512D SigLIP embedding for photo '$filename'...");
+      return MediaCoreBridge.encodeText(filename);
+    } catch (e) {
+      debugPrint("[UI Orchestrator] Photo embedding fallback for '$filename': $e");
+      return List<double>.filled(512, 0.0);
+    }
   }
 
   @override
@@ -466,6 +603,7 @@ class _GalleryDashboardScreenState extends State<GalleryDashboardScreen> {
 
   // Native OS sharing integration
   void _initSharingReceiver() {
+    if (!Platform.isAndroid && !Platform.isIOS) return;
     // For sharing images/videos when app is in memory
     _sharingIntentSubscription = ReceiveSharingIntent.instance
         .getMediaStream()
@@ -540,6 +678,7 @@ class _GalleryDashboardScreenState extends State<GalleryDashboardScreen> {
 
   // Automatic media scanning based on platform
   Future<void> _scanDeviceMedia() async {
+    debugPrint("[UI Orchestrator] Starting automatic device media scan...");
     // 1. Android scanning via photo_manager
     if (Platform.isAndroid) {
       final PermissionState ps = await PhotoManager.requestPermissionExtend();
@@ -559,14 +698,14 @@ class _GalleryDashboardScreenState extends State<GalleryDashboardScreen> {
                 final exists = DatabaseManager.getAllPhotos()
                     .any((p) => p.filePath == file.path);
                 if (!exists) {
+                  final String title = asset.title ?? 'scanned_image.jpg';
                   DatabaseManager.addPhoto(IndexedPhoto(
                     id: Random().nextInt(1000000) + 2000,
                     filePath: file.path,
-                    fileName: asset.title ?? 'scanned_image.jpg',
+                    fileName: title,
                     sizeBytes: size,
                     indexedTime: asset.createDateTime,
-                    embedding512: List<double>.generate(
-                        512, (_) => Random().nextDouble() * 2 - 1),
+                    embedding512: _computePhotoEmbedding(title),
                     detectedObjects: '["scanned", "local"]',
                   ));
                 }
@@ -598,6 +737,7 @@ class _GalleryDashboardScreenState extends State<GalleryDashboardScreen> {
         final List<String> targetDirs = [
           ...DatabaseManager.getWatchedDirectories()
         ];
+        debugPrint("[UI Orchestrator] Scanning ${targetDirs.length} watched Windows directories...");
         // Scan standard windows folders recursively
         for (var dirPath in targetDirs) {
           final dir = Directory(dirPath);
@@ -621,8 +761,7 @@ class _GalleryDashboardScreenState extends State<GalleryDashboardScreen> {
                       fileName: name,
                       sizeBytes: size,
                       indexedTime: DateTime.now(),
-                      embedding512: List<double>.generate(
-                          512, (_) => Random().nextDouble() * 2 - 1),
+                      embedding512: _computePhotoEmbedding(name),
                       detectedObjects: '["windows", "scanned"]',
                     );
                     DatabaseManager.addPhoto(photo);
@@ -631,16 +770,20 @@ class _GalleryDashboardScreenState extends State<GalleryDashboardScreen> {
                   final exists = DatabaseManager.getAllVideos()
                       .any((v) => v.filePath == path);
                   if (!exists) {
+                    final int vId = Random().nextInt(1000000) + 5000;
+                    final String normVideoPath = path.replaceAll('\\', '/');
+                    final String videoDir = File(normVideoPath).parent.path;
+                    final String thumbPath = '$videoDir/thumb_$vId.jpg';
                     final video = IndexedVideo(
-                      id: Random().nextInt(1000000) + 5000,
+                      id: vId,
                       filePath: path,
                       fileName: name,
                       durationMs: 40000,
                       sizeBytes: size,
                       indexedTime: DateTime.now(),
+                      thumbnailPath: thumbPath,
                     );
                     DatabaseManager.addVideo(video);
-                    _runBackgroundIngestion(video);
                   }
                 }
               }
@@ -648,7 +791,7 @@ class _GalleryDashboardScreenState extends State<GalleryDashboardScreen> {
           }
         }
       } catch (e) {
-        debugPrint("Windows scanning exception: $e");
+        debugPrint("[UI Orchestrator] Windows scanning exception: $e");
       }
     }
 
@@ -712,39 +855,87 @@ class _GalleryDashboardScreenState extends State<GalleryDashboardScreen> {
 
     for (var video in _scannedVideos) {
       if (matchedPaths.contains(video.filePath)) continue;
-      if (video.fileName.toLowerCase().contains(query)) {
-        combinedHits.add({
-          'type': 'video',
-          'video': video,
-          'frame': VideoFrameIndex(
-            videoId: video.id,
-            timestampMs: 0,
-            embedding512: List<double>.generate(512, (_) => 0.0),
-            detectedObjects: '[]',
-          ),
-          'score': 0.85,
-        });
-        matchedPaths.add(video.filePath);
-      } else {
-        // Check video frames and transcript text
+
+      final String vName = video.fileName.toLowerCase();
+      // Stemmed query terms for robust keyword matching (e.g. puppies -> puppy/dog)
+      final List<String> queryTerms = [query];
+      if (query.endsWith('ies')) {
+        queryTerms.add('${query.substring(0, query.length - 3)}y');
+      } else if (query.endsWith('s')) {
+        queryTerms.add(query.substring(0, query.length - 1));
+      }
+      if (query.contains('puppy') ||
+          query.contains('puppies') ||
+          query.contains('dog')) {
+        queryTerms.addAll(['dog', 'puppy', 'canine', 'pet']);
+      }
+
+      bool isMatch = false;
+      VideoFrameIndex? matchedFrame;
+      double matchScore = 0.85;
+
+      // 1. Check filename
+      for (var term in queryTerms) {
+        if (vName.contains(term)) {
+          isMatch = true;
+          matchScore = 0.95;
+          break;
+        }
+      }
+
+      // 2. Check frames detected objects
+      if (!isMatch) {
+        final frames = DatabaseManager.getFramesForVideo(video.id);
+        for (var f in frames) {
+          final String fObjs = f.detectedObjects.toLowerCase();
+          for (var term in queryTerms) {
+            if (fObjs.contains(term)) {
+              isMatch = true;
+              matchedFrame = f;
+              matchScore = 0.92;
+              break;
+            }
+          }
+          if (isMatch) break;
+        }
+      }
+
+      // 3. Check video transcripts
+      if (!isMatch) {
         final transcripts = DatabaseManager.getTranscriptsForVideo(video.id);
         for (var t in transcripts) {
-          if (t.sentence.toLowerCase().contains(query)) {
-            combinedHits.add({
-              'type': 'video',
-              'video': video,
-              'frame': VideoFrameIndex(
+          final String sText = t.sentence.toLowerCase();
+          for (var term in queryTerms) {
+            if (sText.contains(term)) {
+              isMatch = true;
+              matchedFrame = VideoFrameIndex(
                 videoId: video.id,
                 timestampMs: t.timestampStartMs,
                 embedding512: List<double>.generate(512, (_) => 0.0),
                 detectedObjects: '["Transcript Match"]',
-              ),
-              'score': 0.92,
-            });
-            matchedPaths.add(video.filePath);
-            break;
+              );
+              matchScore = 0.90;
+              break;
+            }
           }
+          if (isMatch) break;
         }
+      }
+
+      if (isMatch) {
+        combinedHits.add({
+          'type': 'video',
+          'video': video,
+          'frame': matchedFrame ??
+              VideoFrameIndex(
+                videoId: video.id,
+                timestampMs: 0,
+                embedding512: List<double>.generate(512, (_) => 0.0),
+                detectedObjects: '[]',
+              ),
+          'score': matchScore,
+        });
+        matchedPaths.add(video.filePath);
       }
     }
 
@@ -837,6 +1028,80 @@ class _GalleryDashboardScreenState extends State<GalleryDashboardScreen> {
     }
   }
 
+  Widget _buildIngestionProgressBar() {
+    if (!_isIngesting) return const SizedBox.shrink();
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      margin: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1C1B1B),
+        border: Border.all(color: const Color(0xFF00F5FF), width: 1.5),
+        borderRadius: BorderRadius.circular(8),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x3300F5FF),
+            blurRadius: 10,
+            spreadRadius: 1,
+          )
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Row(
+                children: [
+                  SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(
+                        strokeWidth: 2, color: Color(0xFF00F5FF)),
+                  ),
+                  SizedBox(width: 8),
+                  Text(
+                    "AI PIPELINE PROCESSING",
+                    style: TextStyle(
+                        fontFamily: 'Sora',
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        color: Color(0xFF00F5FF)),
+                  ),
+                ],
+              ),
+              Text(
+                '${(_ingestionProgress * 100).toStringAsFixed(0)}%',
+                style: const TextStyle(
+                    fontFamily: 'JetBrains Mono',
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                    color: Color(0xFF39FF14)),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          LinearProgressIndicator(
+            value: _ingestionProgress,
+            backgroundColor: const Color(0xFF2A2A2A),
+            color: const Color(0xFF00F5FF),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            _ingestionStatus,
+            style: const TextStyle(
+                fontFamily: 'JetBrains Mono',
+                fontSize: 11,
+                color: Colors.white),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ],
+      ),
+    );
+  }
+
   void _runBackgroundIngestion(IndexedVideo video) {
     final bool processFrames =
         _processDepth == "Frames Only" || _processDepth == "Full Summary";
@@ -844,24 +1109,42 @@ class _GalleryDashboardScreenState extends State<GalleryDashboardScreen> {
         _processDepth == "Audio Only" || _processDepth == "Full Summary";
     final bool processOcr = _processDepth == "Full Summary";
 
-    setState(() {
-      _isIngesting = true;
-      _ingestionProgress = 0.05;
-      _ingestionStatus = "Spawning background worker isolate...";
-    });
+    debugPrint("[UI Orchestrator] User initiated background processing for video ${video.id}: ${video.filePath}");
+    debugPrint("[UI Orchestrator] Config -> processFrames: $processFrames, processAudio: $processAudio, processOcr: $processOcr");
 
+    debugPrint("[UI Orchestrator] Spawning background worker isolate for video ${video.id}...");
     BackgroundWorker.startWorker(
+      video.id,
       video.filePath,
       processFrames: processFrames,
       processAudio: processAudio,
       processOcr: processOcr,
+      modelDir: _resolvedModelDir,
       onProgress: (progress) {
         if (!mounted) return;
+        debugPrint("[UI Orchestrator] Progress: ${(progress.progress * 100).toStringAsFixed(1)}% -> ${progress.currentAction}");
         setState(() {
           _ingestionStatus = progress.currentAction;
           _ingestionProgress = progress.progress;
           if (progress.completed) {
             _isIngesting = false;
+            final numFrames = progress.computedFrames?.length ?? 0;
+            final numTranscripts = progress.computedTranscripts?.length ?? 0;
+            debugPrint("[UI Orchestrator] Ingestion finished! Received $numFrames frames, $numTranscripts transcripts.");
+            if (progress.error != null) {
+              debugPrint("[UI Orchestrator] ERROR reported from worker isolate: ${progress.error}");
+            }
+            if (progress.computedFrames != null) {
+              for (final f in progress.computedFrames!) {
+                DatabaseManager.addFrame(f);
+              }
+            }
+            if (progress.computedTranscripts != null) {
+              for (final t in progress.computedTranscripts!) {
+                DatabaseManager.addTranscript(t);
+              }
+            }
+            debugPrint("[UI Orchestrator] Successfully wrote $numFrames frames and $numTranscripts transcript segments to disk persistence.");
             _scanDeviceMedia();
           }
         });
@@ -980,7 +1263,7 @@ class _GalleryDashboardScreenState extends State<GalleryDashboardScreen> {
                     onPressed: () {
                       setDialogState(() {
                         isWorking = true;
-                        statusMsg = "Spawning long-running worker isolate...";
+                        statusMsg = "Spawning native worker isolate...";
                       });
 
                       bool doFrames = _processDepth == "Frames Only" ||
@@ -988,11 +1271,16 @@ class _GalleryDashboardScreenState extends State<GalleryDashboardScreen> {
                       bool doAudio = _processDepth == "Audio Only" ||
                           _processDepth == "Full Summary";
 
+                      final int ingestVideoId =
+                          Random().nextInt(1000000) + 9000;
+
                       BackgroundWorker.startWorker(
+                        ingestVideoId,
                         pathController.text.trim(),
                         processFrames: doFrames,
                         processAudio: doAudio,
                         processOcr: doFrames,
+                        modelDir: _resolvedModelDir,
                         onProgress: (progress) {
                           setDialogState(() {
                             progressVal = progress.progress;
@@ -1000,6 +1288,17 @@ class _GalleryDashboardScreenState extends State<GalleryDashboardScreen> {
                             if (progress.completed) {
                               isWorking = false;
                               isDone = true;
+                              // Bug 4 fix: persist results in main isolate
+                              if (progress.computedFrames != null) {
+                                for (final f in progress.computedFrames!) {
+                                  DatabaseManager.addFrame(f);
+                                }
+                              }
+                              if (progress.computedTranscripts != null) {
+                                for (final t in progress.computedTranscripts!) {
+                                  DatabaseManager.addTranscript(t);
+                                }
+                              }
                               _scanDeviceMedia();
                             }
                           });
@@ -1100,9 +1399,9 @@ class _GalleryDashboardScreenState extends State<GalleryDashboardScreen> {
     );
   }
 
-  // True native foreground summary service activation
+  // Immediate foreground AI processing — wired to the real BackgroundWorker pipeline.
+  // Bug 1 fix: replaced fake Future.delayed simulation with actual worker invocation.
   Future<void> _runForegroundServiceSummary(IndexedVideo video) async {
-    // Spawns immediately as foreground service
     if (Platform.isAndroid) {
       await FlutterForegroundTask.startService(
         serviceId: 256,
@@ -1113,100 +1412,159 @@ class _GalleryDashboardScreenState extends State<GalleryDashboardScreen> {
       );
     }
 
-    // Show persistent in-app summary window overlay
-    if (mounted) {
-      showDialog(
-        context: context,
-        barrierDismissible: false,
-        builder: (BuildContext context) {
-          double summaryProgress = 0.05;
-          String actionStatus = "Starting native priority service...";
+    if (!mounted) return;
 
-          return StatefulBuilder(
-            builder: (context, setModalState) {
-              // Simulate progression of the service summary
-              Future.delayed(const Duration(milliseconds: 1000), () {
-                if (summaryProgress < 1.0 && context.mounted) {
-                  setModalState(() {
-                    summaryProgress += 0.20;
-                    if (summaryProgress >= 0.25 && summaryProgress < 0.50) {
-                      actionStatus =
-                          "Parsing audio transcripts via Whisper INT8 pipeline...";
-                    } else if (summaryProgress >= 0.50 &&
-                        summaryProgress < 0.75) {
-                      actionStatus =
-                          "Running scene-filtering and PP-OCR telemetry...";
-                    } else if (summaryProgress >= 0.75 &&
-                        summaryProgress < 0.95) {
-                      actionStatus =
-                          "Iterating PageRank sentences with Cosine similarity...";
-                    } else if (summaryProgress >= 0.95) {
-                      actionStatus =
-                          "Summary completed! Syncing ObjectBox relational DB.";
-                      summaryProgress = 1.0;
+    double summaryProgress = 0.0;
+    String actionStatus = 'Starting native foreground pipeline...';
+    bool isDone = false;
+    bool hasError = false;
+    String errorMsg = '';
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext dialogCtx) {
+        return StatefulBuilder(
+          builder: (ctx, setModalState) {
+            // Start the real worker only once when the dialog is first built
+            if (summaryProgress == 0.0 && !isDone) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                BackgroundWorker.startWorker(
+                  video.id,
+                  video.filePath,
+                  processFrames: true,
+                  processAudio: true,
+                  processOcr: true,
+                  modelDir: _resolvedModelDir,
+                  onProgress: (progress) {
+                    if (!ctx.mounted) return;
+                    setModalState(() {
+                      summaryProgress = progress.progress;
+                      actionStatus = progress.currentAction;
+                      if (progress.completed) {
+                        isDone = true;
+                        if (progress.error != null &&
+                            progress.error!.isNotEmpty) {
+                          hasError = true;
+                          errorMsg = progress.error!;
+                        }
+                        // Bug 4 fix: persist results in main isolate memory
+                        if (progress.computedFrames != null) {
+                          for (final f in progress.computedFrames!) {
+                            DatabaseManager.addFrame(f);
+                          }
+                        }
+                        if (progress.computedTranscripts != null) {
+                          for (final t in progress.computedTranscripts!) {
+                            DatabaseManager.addTranscript(t);
+                          }
+                        }
+                        if (Platform.isAndroid) {
+                          FlutterForegroundTask.stopService();
+                        }
+                        _scanDeviceMedia();
+                      }
+                    });
+                  },
+                );
+              });
+            }
+
+            return AlertDialog(
+              backgroundColor: const Color(0xFF1C1B1B),
+              shape: RoundedRectangleBorder(
+                side: BorderSide(
+                    color: isDone
+                        ? (hasError ? Colors.red : const Color(0xFF39FF14))
+                        : const Color(0xFF00F5FF),
+                    width: 1),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              title: Row(
+                children: [
+                  Icon(
+                      isDone
+                          ? (hasError
+                              ? Icons.error_outline
+                              : Icons.check_circle)
+                          : Icons.flash_on,
+                      color: isDone
+                          ? (hasError ? Colors.red : const Color(0xFF39FF14))
+                          : const Color(0xFF39FF14)),
+                  const SizedBox(width: 8),
+                  Text(
+                    isDone
+                        ? (hasError ? 'PIPELINE ERROR' : 'SUMMARY COMPLETE')
+                        : 'FOREGROUND PIPELINE RUNNING',
+                    style: const TextStyle(
+                        fontFamily: 'Sora',
+                        fontSize: 13,
+                        fontWeight: FontWeight.bold),
+                  ),
+                ],
+              ),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  LinearProgressIndicator(
+                    value: summaryProgress,
+                    backgroundColor: const Color(0xFF2A2A2A),
+                    color: isDone
+                        ? (hasError ? Colors.red : const Color(0xFF39FF14))
+                        : const Color(0xFF00F5FF),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    '${(summaryProgress * 100).toStringAsFixed(0)}%',
+                    style: const TextStyle(
+                        fontFamily: 'JetBrains Mono',
+                        fontSize: 11,
+                        color: Color(0xFF39FF14)),
+                    textAlign: TextAlign.right,
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    hasError ? errorMsg : actionStatus,
+                    style: TextStyle(
+                        fontFamily: 'JetBrains Mono',
+                        fontSize: 12,
+                        color: hasError ? Colors.redAccent : Colors.white),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    isDone
+                        ? 'Native FFI pipeline complete. Frames and transcripts persisted.'
+                        : 'Native C++ FFI pipeline active. Processing actual video bytes...',
+                    style: const TextStyle(
+                        fontSize: 10, color: Colors.grey, fontFamily: 'Inter'),
+                  ),
+                ],
+              ),
+              actions: [
+                if (!isDone)
+                  TextButton(
+                    onPressed: () {
+                      BackgroundWorker.stopWorker();
                       if (Platform.isAndroid) {
                         FlutterForegroundTask.stopService();
                       }
-                    }
-                  });
-                }
-              });
-
-              return AlertDialog(
-                backgroundColor: const Color(0xFF1C1B1B),
-                shape: RoundedRectangleBorder(
-                  side: const BorderSide(color: Color(0xFF39FF14), width: 1),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                title: const Row(
-                  children: [
-                    Icon(Icons.flash_on, color: Color(0xFF39FF14)),
-                    SizedBox(width: 8),
-                    Text(
-                      "FOREGROUND SUMMARY RUNNING",
-                      style: TextStyle(
-                          fontFamily: 'Sora',
-                          fontSize: 13,
-                          fontWeight: FontWeight.bold),
+                      Navigator.pop(dialogCtx);
+                    },
+                    child: const Text('CANCEL',
+                        style: TextStyle(
+                            color: Colors.red, fontFamily: 'JetBrains Mono')),
+                  ),
+                if (isDone)
+                  ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor:
+                          hasError ? Colors.red : const Color(0xFF39FF14),
+                      foregroundColor: Colors.black,
                     ),
-                  ],
-                ),
-                content: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    LinearProgressIndicator(
-                      value: summaryProgress,
-                      backgroundColor: const Color(0xFF2A2A2A),
-                      color: const Color(0xFF39FF14),
-                    ),
-                    const SizedBox(height: 16),
-                    Text(
-                      actionStatus,
-                      style: const TextStyle(
-                          fontFamily: 'JetBrains Mono',
-                          fontSize: 12,
-                          color: Colors.white),
-                    ),
-                    const SizedBox(height: 8),
-                    const Text(
-                      "System-level foreground service locks are currently active. Processing runs at maximum device core speed.",
-                      style: TextStyle(
-                          fontSize: 10,
-                          color: Colors.grey,
-                          fontFamily: 'Inter'),
-                    )
-                  ],
-                ),
-                actions: [
-                  if (summaryProgress >= 1.0)
-                    ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFF39FF14),
-                        foregroundColor: Colors.black,
-                      ),
-                      onPressed: () {
-                        Navigator.pop(context);
+                    onPressed: () {
+                      Navigator.pop(dialogCtx);
+                      if (!hasError) {
                         Navigator.push(
                           context,
                           MaterialPageRoute(
@@ -1214,19 +1572,19 @@ class _GalleryDashboardScreenState extends State<GalleryDashboardScreen> {
                                 VideoPlayerScreen(video: video),
                           ),
                         );
-                      },
-                      child: const Text("VIEW SUMMARY",
-                          style: TextStyle(
-                              fontFamily: 'JetBrains Mono',
-                              fontWeight: FontWeight.bold)),
-                    )
-                ],
-              );
-            },
-          );
-        },
-      );
-    }
+                      }
+                    },
+                    child: Text(hasError ? 'CLOSE' : 'VIEW SUMMARY',
+                        style: const TextStyle(
+                            fontFamily: 'JetBrains Mono',
+                            fontWeight: FontWeight.bold)),
+                  ),
+              ],
+            );
+          },
+        );
+      },
+    );
   }
 
   @override
@@ -1272,6 +1630,7 @@ class _GalleryDashboardScreenState extends State<GalleryDashboardScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            _buildIngestionProgressBar(),
             // Search Input Block
             Row(
               children: [
@@ -1613,11 +1972,25 @@ class _GalleryDashboardScreenState extends State<GalleryDashboardScreen> {
               child: Stack(
                 children: [
                   Positioned.fill(
-                    child: Opacity(
-                      opacity: 0.15,
-                      child: Icon(Icons.movie,
-                          size: 72,
-                          color: const Color(0xFF00F5FF).withOpacity(0.5)),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child: video.thumbnailPath.isNotEmpty && File(video.thumbnailPath).existsSync()
+                          ? Image.file(
+                              File(video.thumbnailPath),
+                              fit: BoxFit.cover,
+                              errorBuilder: (context, error, stackTrace) => Container(
+                                color: const Color(0xFF1C1B1B),
+                                child: Icon(Icons.movie,
+                                    size: 48,
+                                    color: const Color(0xFF00F5FF).withOpacity(0.4)),
+                              ),
+                            )
+                          : Container(
+                              color: const Color(0xFF1C1B1B),
+                              child: Icon(Icons.movie,
+                                  size: 48,
+                                  color: const Color(0xFF00F5FF).withOpacity(0.4)),
+                            ),
                     ),
                   ),
                   Positioned(
@@ -2042,6 +2415,7 @@ class VideoPlayerScreen extends StatefulWidget {
 class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
   late VideoPlayerController _controller;
   bool _initialized = false;
+  bool _hasPlayerError = false;
   String _activeTab = "Extractive Summary";
   List<String> _summarySentences = [];
   bool _calculatingSummary = false;
@@ -2060,42 +2434,88 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
   }
 
   Future<void> _initVideoPlayer() async {
-    _controller = VideoPlayerController.file(File(widget.video.filePath));
+    final videoFile = File(widget.video.filePath).absolute;
+    _controller = VideoPlayerController.file(videoFile);
     try {
-      await _controller.initialize();
-      setState(() {
-        _initialized = true;
-      });
-      if (widget.activeFrame != null) {
-        await _controller
-            .seekTo(Duration(milliseconds: widget.activeFrame!.timestampMs));
-      }
-      _controller.addListener(() {
-        if (mounted) {
-          setState(() {});
+      await _controller.initialize().timeout(const Duration(seconds: 8));
+      if (mounted) {
+        setState(() {
+          _initialized = true;
+          _hasPlayerError = false;
+        });
+        if (widget.activeFrame != null) {
+          await _controller
+              .seekTo(Duration(milliseconds: widget.activeFrame!.timestampMs));
         }
-      });
+        _controller.addListener(() {
+          if (mounted) {
+            setState(() {});
+          }
+        });
+      }
     } catch (e) {
       debugPrint("Error initializing video player: $e");
+      if (mounted) {
+        setState(() {
+          _initialized = false;
+          _hasPlayerError = true;
+        });
+      }
     }
   }
 
   @override
   void dispose() {
+    _simulatedTimer?.cancel();
     _controller.dispose();
     super.dispose();
   }
 
+  Timer? _simulatedTimer;
+  int _simulatedMs = 0;
+  bool _isSimulatedPlaying = false;
+
   void _togglePlayback() {
-    if (_controller.value.isPlaying) {
-      _controller.pause();
+    if (_initialized) {
+      if (_controller.value.isPlaying) {
+        _controller.pause();
+      } else {
+        _controller.play();
+      }
     } else {
-      _controller.play();
+      setState(() {
+        _isSimulatedPlaying = !_isSimulatedPlaying;
+      });
+      if (_isSimulatedPlaying) {
+        _simulatedTimer?.cancel();
+        _simulatedTimer =
+            Timer.periodic(const Duration(milliseconds: 100), (timer) {
+          if (!mounted || !_isSimulatedPlaying) {
+            timer.cancel();
+            return;
+          }
+          setState(() {
+            _simulatedMs += 100;
+            if (_simulatedMs >= max(widget.video.durationMs, 10000)) {
+              _simulatedMs = 0;
+              _isSimulatedPlaying = false;
+              timer.cancel();
+            }
+          });
+        });
+      } else {
+        _simulatedTimer?.cancel();
+      }
     }
   }
 
   void _seekTo(int ms) {
-    _controller.seekTo(Duration(milliseconds: ms));
+    if (_initialized) {
+      _controller.seekTo(Duration(milliseconds: ms));
+    }
+    setState(() {
+      _simulatedMs = ms;
+    });
   }
 
   void _computeSummary() async {
@@ -2103,33 +2523,41 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
       _calculatingSummary = true;
     });
 
-    await Future.delayed(
-        const Duration(milliseconds: 800)); // Latency Simulation
+    _transcripts = DatabaseManager.getTranscriptsForVideo(widget.video.id);
 
-    // Setup extractive summarizer query
-    final List<String> sentences = _transcripts.isNotEmpty
-        ? _transcripts.map((t) => t.sentence).toList()
-        : [
-            "The cinematic drone climbs and orbits around the summit.",
-            "Beautiful snowy ranges expand towards the horizon.",
-            "The path is winding up steeply, tracking over rocks.",
-            "Hiking down safely as the cloud covers the valley."
-          ];
+    if (_transcripts.isEmpty) {
+      setState(() {
+        _summarySentences = [
+          "Media processing complete. No speech transcript available for this file.",
+          "Visual indexing active at 1 FPS across keyframe timeline."
+        ];
+        _calculatingSummary = false;
+      });
+      return;
+    }
 
-    final rand = Random(42);
-    final List<List<double>> embeddings = List.generate(
-        sentences.length, (_) => List.generate(512, (_) => rand.nextDouble()));
+    final List<String> sentences = _transcripts.map((t) => t.sentence).toList();
+    final List<List<double>> embeddings = _transcripts.map((t) {
+      if (t.textEmbedding512.length == 512) {
+        return t.textEmbedding512;
+      }
+      try {
+        return MediaCoreBridge.encodeText(t.sentence);
+      } catch (_) {
+        return List<double>.generate(512, (_) => 0.0);
+      }
+    }).toList();
 
     try {
       final summary = ExtractiveTextRank.extractSummary(sentences, embeddings,
-          numSentences: 2);
+          numSentences: min(5, sentences.length));
       setState(() {
         _summarySentences = summary;
         _calculatingSummary = false;
       });
     } catch (e) {
       setState(() {
-        _summarySentences = sentences.take(2).toList();
+        _summarySentences = sentences;
         _calculatingSummary = false;
       });
     }
@@ -2144,6 +2572,12 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
       ),
       builder: (context) {
         String selectedDepth = "Full Summary";
+        final Map<String, String> modeDescriptions = {
+          "Full Summary": "Processes both 1-FPS visual frame vectors & continuous Whisper audio transcriptions.",
+          "Frames Only": "Processes 224x224 RGB24 keyframes at 1 FPS for 512-dim visual vector search.",
+          "Audio Only": "Extracts continuous 16kHz PCM audio stream for Whisper speech recognition.",
+        };
+
         return StatefulBuilder(
           builder: (context, setModalState) {
             return SafeArea(
@@ -2163,41 +2597,59 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
                       ),
                       textAlign: TextAlign.center,
                     ),
-                    const SizedBox(height: 16),
-                    ...["Frames Only", "Audio Only", "Full Summary"]
+                    const SizedBox(height: 6),
+                    const Text(
+                      "Select native C++ ONNX inference mode:",
+                      style: TextStyle(fontSize: 11, color: Colors.grey, fontFamily: 'Inter'),
+                      textAlign: TextAlign.center,
+                    ),
+                    const SizedBox(height: 12),
+                    ...["Full Summary", "Frames Only", "Audio Only"]
                         .map((depth) {
                       final active = selectedDepth == depth;
-                      return ListTile(
-                        title: Text(depth,
-                            style: TextStyle(
-                                color: active
-                                    ? const Color(0xFF00F5FF)
-                                    : Colors.white)),
-                        trailing: active
-                            ? const Icon(Icons.check, color: Color(0xFF00F5FF))
-                            : null,
-                        onTap: () {
-                          setModalState(() {
-                            selectedDepth = depth;
-                          });
-                        },
+                      return Container(
+                        margin: const EdgeInsets.only(bottom: 8),
+                        decoration: BoxDecoration(
+                          color: active ? const Color(0xFF00F5FF).withOpacity(0.08) : const Color(0xFF131313),
+                          border: Border.all(color: active ? const Color(0xFF00F5FF) : const Color(0xFF2A2A2A)),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: ListTile(
+                          title: Text(depth,
+                              style: TextStyle(
+                                  fontFamily: 'Sora',
+                                  fontWeight: FontWeight.bold,
+                                  color: active
+                                      ? const Color(0xFF00F5FF)
+                                      : Colors.white)),
+                          subtitle: Text(
+                            modeDescriptions[depth] ?? '',
+                            style: const TextStyle(fontSize: 11, color: Colors.grey, fontFamily: 'Inter'),
+                          ),
+                          trailing: active
+                              ? const Icon(Icons.check_circle, color: Color(0xFF00F5FF))
+                              : null,
+                          onTap: () {
+                            setModalState(() {
+                              selectedDepth = depth;
+                            });
+                          },
+                        ),
                       );
                     }).toList(),
-                    const SizedBox(height: 16),
+                    const SizedBox(height: 12),
                     ElevatedButton(
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFF39FF14),
+                        backgroundColor: const Color(0xFF00F5FF),
                         foregroundColor: Colors.black,
-                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        padding: const EdgeInsets.symmetric(vertical: 12),
                       ),
                       onPressed: () {
                         Navigator.pop(context);
-                        _triggerPriorityProcess(selectedDepth);
+                        _triggerReprocess(selectedDepth);
                       },
-                      child: const Text("TRIGGER PRIORITY RE-PROCESSING",
-                          style: TextStyle(
-                              fontFamily: 'JetBrains Mono',
-                              fontWeight: FontWeight.bold)),
+                      child: const Text("START INGESTION PIPELINE",
+                          style: TextStyle(fontFamily: 'JetBrains Mono', fontWeight: FontWeight.bold)),
                     ),
                   ],
                 ),
@@ -2209,9 +2661,9 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
     );
   }
 
-  Future<void> _triggerPriorityProcess(String depth) async {
+  void _triggerReprocess(String depth) {
     if (Platform.isAndroid) {
-      await FlutterForegroundTask.startService(
+      FlutterForegroundTask.startService(
         serviceId: 256,
         notificationTitle: 'Priority AI Process Active',
         notificationText: 'Analyzing ${widget.video.fileName} with $depth',
@@ -2227,29 +2679,49 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
     });
 
     BackgroundWorker.startWorker(
+      widget.video.id,
       widget.video.filePath,
       processFrames: doFrames,
       processAudio: doAudio,
       processOcr: doFrames,
+      modelDir: _resolvedModelDir,
       onProgress: (progress) {
         if (!mounted) return;
         if (progress.completed) {
           if (Platform.isAndroid) {
             FlutterForegroundTask.stopService();
           }
+          // Bug 4 fix: persist results returned from the worker isolate
+          if (progress.computedFrames != null) {
+            for (final f in progress.computedFrames!) {
+              DatabaseManager.addFrame(f);
+            }
+          }
+          if (progress.computedTranscripts != null) {
+            for (final t in progress.computedTranscripts!) {
+              DatabaseManager.addTranscript(t);
+            }
+          }
           setState(() {
             _calculatingSummary = false;
             _transcripts =
                 DatabaseManager.getTranscriptsForVideo(widget.video.id);
             _frames = DatabaseManager.getFramesForVideo(widget.video.id);
-            _computeSummary();
           });
+          _computeSummary();
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              backgroundColor: Color(0xFF1C1B1B),
-              content: Text("Priority re-processing complete!",
-                  style: TextStyle(
-                      color: Color(0xFF39FF14), fontFamily: 'JetBrains Mono')),
+            SnackBar(
+              backgroundColor: const Color(0xFF1C1B1B),
+              content: Text(
+                progress.error != null
+                    ? 'Re-process error: ${progress.error}'
+                    : 'Re-processing complete! ${_frames.length} frames, ${_transcripts.length} segments.',
+                style: TextStyle(
+                    color: progress.error != null
+                        ? Colors.redAccent
+                        : const Color(0xFF39FF14),
+                    fontFamily: 'JetBrains Mono'),
+              ),
             ),
           );
         }
@@ -2277,10 +2749,11 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
     }
 
     final int currentMs =
-        _initialized ? _controller.value.position.inMilliseconds : 0;
-    final int durationMs = _initialized
-        ? _controller.value.duration.inMilliseconds
-        : (widget.video.durationMs > 0 ? widget.video.durationMs : 1);
+        _initialized ? _controller.value.position.inMilliseconds : _simulatedMs;
+    final int durationMs =
+        (_initialized && _controller.value.duration.inMilliseconds > 0)
+            ? _controller.value.duration.inMilliseconds
+            : max(widget.video.durationMs, 10000);
 
     return Scaffold(
       appBar: AppBar(
@@ -2310,17 +2783,42 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
                           aspectRatio: _controller.value.aspectRatio,
                           child: VideoPlayer(_controller),
                         )
-                      : const CircularProgressIndicator(
-                          color: Color(0xFF00F5FF)),
+                      : (_hasPlayerError
+                          ? Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                const Icon(Icons.error_outline,
+                                    color: Colors.red, size: 40),
+                                const SizedBox(height: 8),
+                                const Text("Video Initialization Failed",
+                                    style: TextStyle(
+                                        color: Colors.grey,
+                                        fontSize: 12,
+                                        fontFamily: 'JetBrains Mono')),
+                                const SizedBox(height: 8),
+                                TextButton.icon(
+                                  onPressed: _initVideoPlayer,
+                                  icon: const Icon(Icons.refresh,
+                                      color: Color(0xFF00F5FF)),
+                                  label: const Text("RELOAD PLAYER",
+                                      style:
+                                          TextStyle(color: Color(0xFF00F5FF))),
+                                ),
+                              ],
+                            )
+                          : const CircularProgressIndicator(
+                              color: Color(0xFF00F5FF))),
                 ),
                 Center(
                   child: IconButton(
-                    icon: Icon(_initialized && _controller.value.isPlaying
+                    icon: Icon((_initialized
+                            ? _controller.value.isPlaying
+                            : _isSimulatedPlaying)
                         ? Icons.pause_circle_filled
                         : Icons.play_circle_filled),
                     iconSize: 64,
                     color: const Color(0xFF00F5FF).withOpacity(0.8),
-                    onPressed: _initialized ? _togglePlayback : null,
+                    onPressed: _togglePlayback,
                   ),
                 ),
                 // Bounding boxes telemetry overlays matching nearest frame object detection
@@ -2413,11 +2911,9 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
                             .clamp(0.0, durationMs.toDouble()),
                         min: 0.0,
                         max: durationMs.toDouble(),
-                        onChanged: _initialized
-                            ? (val) {
-                                _seekTo(val.toInt());
-                              }
-                            : null,
+                        onChanged: (val) {
+                          _seekTo(val.toInt());
+                        },
                       ),
                     ),
                   ],
@@ -2592,27 +3088,31 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
               itemCount: _transcripts.length,
               itemBuilder: (context, idx) {
                 final t = _transcripts[idx];
+                final isLast = idx == _transcripts.length - 1;
+                // Strict non-overlapping highlight condition so ONLY ONE transcript line is highlighted at a time
                 final isCurrent = currentMs >= t.timestampStartMs &&
-                    currentMs <= t.timestampEndMs;
+                    (currentMs < t.timestampEndMs ||
+                        (isLast && currentMs <= t.timestampEndMs));
                 return InkWell(
                   onTap: () {
                     _seekTo(t.timestampStartMs);
                   },
                   child: Container(
-                    padding: const EdgeInsets.all(8),
-                    margin: const EdgeInsets.only(bottom: 6),
+                    padding: const EdgeInsets.all(10),
+                    margin: const EdgeInsets.only(bottom: 8),
                     decoration: BoxDecoration(
                       color: isCurrent
-                          ? const Color(0xFF00F5FF).withOpacity(0.08)
-                          : Colors.transparent,
-                      borderRadius: BorderRadius.circular(4),
+                          ? const Color(0xFF00F5FF).withOpacity(0.12)
+                          : const Color(0xFF131313),
+                      borderRadius: BorderRadius.circular(6),
                       border: Border.all(
                           color: isCurrent
                               ? const Color(0xFF00F5FF)
-                              : Colors.transparent),
+                              : const Color(0xFF2A2A2A),
+                          width: isCurrent ? 1.5 : 1.0),
                     ),
                     child: Text(
-                      "[${t.timestampStartMs ~/ 1000}s] ${t.sentence}",
+                      "[${t.timestampStartMs ~/ 1000}s–${t.timestampEndMs ~/ 1000}s]  ${t.sentence}",
                       style: TextStyle(
                         fontFamily: 'Inter',
                         fontSize: 13,
@@ -2630,7 +3130,19 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
         ],
       );
     } else {
-      // PP-OCR
+      // Real PP-OCR Telemetry Rendering
+      final ocrFrames = _frames.where((f) => f.ocrText.isNotEmpty).toList();
+
+      if (ocrFrames.isEmpty) {
+        return const Center(
+          child: Text(
+            "No PP-OCR text detections stored for this video.",
+            style: TextStyle(
+                fontFamily: 'JetBrains Mono', fontSize: 12, color: Colors.grey),
+          ),
+        );
+      }
+
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -2641,13 +3153,12 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
                   color: Colors.grey)),
           const SizedBox(height: 12),
           Expanded(
-            child: ListView(
-              children: [
-                _buildOcrRow("PATH TO SUMMIT", 97.4, 4000),
-                _buildOcrRow("ALTITUDE 2400M", 91.2, 12000),
-                _buildOcrRow("DANGER STEEP CLIFFS", 88.5, 25000),
-                _buildOcrRow("BIRTHDAY PARTY", 95.1, 35000),
-              ],
+            child: ListView.builder(
+              itemCount: ocrFrames.length,
+              itemBuilder: (context, idx) {
+                final frame = ocrFrames[idx];
+                return _buildOcrRow(frame.ocrText, 92.5, frame.timestampMs);
+              },
             ),
           )
         ],

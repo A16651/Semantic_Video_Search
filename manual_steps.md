@@ -18,14 +18,17 @@ flutter create --platforms=windows,android .
 
 ### B. Windows Desktop Compilation (MSVC x64)
 
-Ensure Visual Studio with "Desktop development with C++" is installed. Launch a **Developer PowerShell for VS 2022** and execute:
+Ensure Visual Studio with "Desktop development with C++" is installed. Launch a **Developer PowerShell for VS 2022** (or `vcvars64.bat` for 64-bit targets) and execute:
 
 ```powershell
+# Ensure x64 architecture environment is active (vcvars64.bat)
 cd media_core_ffi/native
 cl.exe /LD /O2 /EHsc media_core.cpp /Fe:media_core.dll
 ```
 
-Move the generated `media_core.dll` library to the `media_core_ffi/` root folder or place it in the same directory as your compiled Flutter executable.
+> **Important:** Ensure the MSVC compiler target is set to **x64** (0x8664). Using an x86 compiler will result in a 32-bit DLL causing Windows error 193 (`ERROR_BAD_EXE_FORMAT`) when loaded by the 64-bit Flutter application.
+
+Move the generated `media_core.dll` library to the `media_core_ffi/` root folder and copy it into `media_core_ffi/build/windows/x64/runner/Debug/` (or the executable directory).
 
 ### C. Android Native Development Kit (NDK) Compilation
 

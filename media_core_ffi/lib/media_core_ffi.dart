@@ -90,6 +90,68 @@ typedef WhisperDecodeTokensDart = ffi.Pointer<Utf8> Function(
   ffi.Pointer<Utf8> tokenizerJsonPath,
 );
 
+typedef WhisperTranscribeAudioC = ffi.Pointer<Utf8> Function(
+  ffi.Pointer<ffi.Float> melData,
+  ffi.Int32 melBins,
+  ffi.Pointer<Utf8> modelDir,
+);
+typedef WhisperTranscribeAudioDart = ffi.Pointer<Utf8> Function(
+  ffi.Pointer<ffi.Float> melData,
+  int melBins,
+  ffi.Pointer<Utf8> modelDir,
+);
+
+typedef WhisperTranscribeFullPcmC = ffi.Pointer<Utf8> Function(
+  ffi.Pointer<ffi.Int16> pcmData,
+  ffi.Int32 totalSamples,
+  ffi.Pointer<Utf8> modelDir,
+);
+typedef WhisperTranscribeFullPcmDart = ffi.Pointer<Utf8> Function(
+  ffi.Pointer<ffi.Int16> pcmData,
+  int totalSamples,
+  ffi.Pointer<Utf8> modelDir,
+);
+
+typedef RunPpOcrC = ffi.Pointer<OCRTextResultStruct> Function(
+  ffi.Pointer<ffi.Uint8> rgbData,
+  ffi.Uint32 width,
+  ffi.Uint32 height,
+  ffi.Pointer<Utf8> modelDir,
+  ffi.Pointer<ffi.Int32> outCount,
+);
+typedef RunPpOcrDart = ffi.Pointer<OCRTextResultStruct> Function(
+  ffi.Pointer<ffi.Uint8> rgbData,
+  int width,
+  int height,
+  ffi.Pointer<Utf8> modelDir,
+  ffi.Pointer<ffi.Int32> outCount,
+);
+
+typedef FreeOcrResultsC = ffi.Void Function(ffi.Pointer<OCRTextResultStruct> ptr);
+typedef FreeOcrResultsDart = void Function(ffi.Pointer<OCRTextResultStruct> ptr);
+
+typedef SaveFrameAsJpegC = ffi.Bool Function(
+  ffi.Pointer<ffi.Uint8> rgbData,
+  ffi.Uint32 width,
+  ffi.Uint32 height,
+  ffi.Pointer<Utf8> outputPath,
+);
+typedef SaveFrameAsJpegDart = bool Function(
+  ffi.Pointer<ffi.Uint8> rgbData,
+  int width,
+  int height,
+  ffi.Pointer<Utf8> outputPath,
+);
+
+typedef EncodeImageFrameC = ffi.Pointer<ffi.Float> Function(
+  ffi.Pointer<ffi.Float> chwData,
+  ffi.Pointer<ffi.Int32> outDimension,
+);
+typedef EncodeImageFrameDart = ffi.Pointer<ffi.Float> Function(
+  ffi.Pointer<ffi.Float> chwData,
+  ffi.Pointer<ffi.Int32> outDimension,
+);
+
 typedef NormalizeRgb24HwcToChwC = ffi.Pointer<ffi.Float> Function(
   ffi.Pointer<ffi.Uint8> rgbData,
   ffi.Uint32 width,
@@ -105,6 +167,12 @@ typedef NormalizeRgb24HwcToChwDart = ffi.Pointer<ffi.Float> Function(
   int targetH,
 );
 
+typedef InitWhisperModelsC = ffi.Bool Function(ffi.Pointer<Utf8> modelDir);
+typedef InitWhisperModelsDart = bool Function(ffi.Pointer<Utf8> modelDir);
+
+typedef FreeStringBufferC = ffi.Void Function(ffi.Pointer<Utf8> ptr);
+typedef FreeStringBufferDart = void Function(ffi.Pointer<Utf8> ptr);
+
 typedef FreeFloatBufferC = ffi.Void Function(ffi.Pointer<ffi.Float> ptr);
 typedef FreeFloatBufferDart = void Function(ffi.Pointer<ffi.Float> ptr);
 
@@ -118,7 +186,27 @@ class MediaCoreBridge {
   static void init() {
     if (_lib != null) return;
     if (Platform.isWindows) {
-      _lib = ffi.DynamicLibrary.open('media_core.dll');
+      try {
+        _lib = ffi.DynamicLibrary.open('media_core.dll');
+      } catch (_) {
+        // Fallback paths if standard DLL load fails due to working directory changes
+        final exeDir = File(Platform.resolvedExecutable).parent.path;
+        final candidates = [
+          '$exeDir/media_core.dll',
+          '${Directory.current.path}/media_core.dll',
+          '${Directory.current.path}/media_core_ffi/media_core.dll',
+          '${Directory.current.path}/../media_core.dll',
+        ];
+        for (var path in candidates) {
+          if (File(path).existsSync()) {
+            try {
+              _lib = ffi.DynamicLibrary.open(path);
+              break;
+            } catch (_) {}
+          }
+        }
+        _lib ??= ffi.DynamicLibrary.open('media_core.dll');
+      }
     } else if (Platform.isAndroid || Platform.isLinux) {
       _lib = ffi.DynamicLibrary.open('libmedia_core.so');
     } else {
@@ -151,6 +239,9 @@ class MediaCoreBridge {
 
     try {
       final floatPtr = func(queryPtr, outDimPtr);
+      if (floatPtr == ffi.nullptr) {
+        throw StateError("SigLIP Inference Failed: Unable to generate text embedding for '$query'");
+      }
       final size = outDimPtr.value;
       final List<double> result = [];
       for (int i = 0; i < size; i++) {
@@ -160,6 +251,48 @@ class MediaCoreBridge {
       return result;
     } finally {
       calloc.free(queryPtr);
+      calloc.free(outDimPtr);
+    }
+  }
+
+  static bool saveFrameAsJpeg(
+    ffi.Pointer<ffi.Uint8> rgbData,
+    int width,
+    int height,
+    String outputPath,
+  ) {
+    init();
+    final func = _lib!
+        .lookup<ffi.NativeFunction<SaveFrameAsJpegC>>('save_frame_as_jpeg')
+        .asFunction<SaveFrameAsJpegDart>();
+    final pathPtr = outputPath.toNativeUtf8();
+    try {
+      return func(rgbData, width, height, pathPtr);
+    } finally {
+      calloc.free(pathPtr);
+    }
+  }
+
+  static List<double> encodeImageFrame(ffi.Pointer<ffi.Float> chwTensor) {
+    init();
+    final func = _lib!
+        .lookup<ffi.NativeFunction<EncodeImageFrameC>>('encode_image_frame')
+        .asFunction<EncodeImageFrameDart>();
+
+    final outDimPtr = calloc<ffi.Int32>();
+    try {
+      final floatPtr = func(chwTensor, outDimPtr);
+      if (floatPtr == ffi.nullptr) {
+        throw StateError("SigLIP Vision Transformer Inference Failed");
+      }
+      final size = outDimPtr.value;
+      final List<double> result = [];
+      for (int i = 0; i < size; i++) {
+        result.add(floatPtr[i]);
+      }
+      freeFloat(floatPtr);
+      return result;
+    } finally {
       calloc.free(outDimPtr);
     }
   }
@@ -286,6 +419,116 @@ class MediaCoreBridge {
     }
   }
 
+  static String whisperTranscribeAudio(List<double> melData, String modelDir) {
+    init();
+    final func = _lib!
+        .lookup<ffi.NativeFunction<WhisperTranscribeAudioC>>('whisper_transcribe_audio')
+        .asFunction<WhisperTranscribeAudioDart>();
+
+    final melPtr = calloc<ffi.Float>(melData.length);
+    for (int i = 0; i < melData.length; i++) {
+      melPtr[i] = melData[i];
+    }
+    final dirPtr = modelDir.toNativeUtf8();
+
+    try {
+      final strPtr = func(melPtr, melData.length, dirPtr);
+      final String result = strPtr.toDartString();
+      freeByte(strPtr.cast<ffi.Uint8>());
+      return result;
+    } finally {
+      calloc.free(melPtr);
+      calloc.free(dirPtr);
+    }
+  }
+
+  static String whisperTranscribeFullPcm(List<int> pcmData, String modelDir) {
+    init();
+    final func = _lib!
+        .lookup<ffi.NativeFunction<WhisperTranscribeFullPcmC>>('whisper_transcribe_full_pcm')
+        .asFunction<WhisperTranscribeFullPcmDart>();
+
+    final pcmPtr = calloc<ffi.Int16>(pcmData.length);
+    for (int i = 0; i < pcmData.length; i++) {
+      pcmPtr[i] = pcmData[i];
+    }
+    final dirPtr = modelDir.toNativeUtf8();
+
+    try {
+      final strPtr = func(pcmPtr, pcmData.length, dirPtr);
+      final String result = strPtr.toDartString();
+      freeString(strPtr);
+      return result;
+    } finally {
+      calloc.free(pcmPtr);
+      calloc.free(dirPtr);
+    }
+  }
+
+  static List<Map<String, dynamic>> runPpOcr(
+    ffi.Pointer<ffi.Uint8> rgbData,
+    int width,
+    int height,
+    String modelDir,
+  ) {
+    init();
+    final func = _lib!
+        .lookup<ffi.NativeFunction<RunPpOcrC>>('run_pp_ocr')
+        .asFunction<RunPpOcrDart>();
+
+    final outCountPtr = calloc<ffi.Int32>();
+    final dirPtr = modelDir.toNativeUtf8();
+
+    try {
+      final ffi.Pointer<OCRTextResultStruct> resultsPtr =
+          func(rgbData, width, height, dirPtr, outCountPtr);
+      final int count = outCountPtr.value;
+
+      final List<Map<String, dynamic>> list = [];
+      if (resultsPtr != ffi.nullptr && count > 0) {
+        for (int i = 0; i < count; i++) {
+          final structItem = (resultsPtr + i).ref;
+
+          final List<int> charCodes = [];
+          for (int c = 0; c < 256; c++) {
+            final code = structItem.text[c];
+            if (code == 0) break;
+            charCodes.add(code);
+          }
+          final String text = String.fromCharCodes(charCodes).trim();
+
+          final List<double> box = [];
+          for (int b = 0; b < 8; b++) {
+            box.add(structItem.boundingBox[b]);
+          }
+
+          if (text.isNotEmpty) {
+            list.add({
+              'text': text,
+              'confidence': structItem.confidence,
+              'boundingBox': box,
+            });
+          }
+        }
+
+        // CRITICAL MEMORY GUARD: Free native OCR struct array memory immediately after reading
+        freeOcrResults(resultsPtr);
+      }
+      return list;
+    } finally {
+      calloc.free(outCountPtr);
+      calloc.free(dirPtr);
+    }
+  }
+
+  static void freeOcrResults(ffi.Pointer<OCRTextResultStruct> ptr) {
+    init();
+    final func = _lib!
+        .lookup<ffi.NativeFunction<FreeOcrResultsC>>('free_ocr_results')
+        .asFunction<FreeOcrResultsDart>();
+    func(ptr);
+  }
+
   static ffi.Pointer<ffi.Float> normalizeRgb24(
     ffi.Pointer<ffi.Uint8> rgbData,
     int width,
@@ -298,6 +541,27 @@ class MediaCoreBridge {
         .lookup<ffi.NativeFunction<NormalizeRgb24HwcToChwC>>('normalize_rgb24_hwc_to_chw')
         .asFunction<NormalizeRgb24HwcToChwDart>();
     return func(rgbData, width, height, targetW, targetH);
+  }
+
+  static bool initWhisperModels(String modelDir) {
+    init();
+    final func = _lib!
+        .lookup<ffi.NativeFunction<InitWhisperModelsC>>('init_whisper_models')
+        .asFunction<InitWhisperModelsDart>();
+    final pathPtr = modelDir.toNativeUtf8();
+    try {
+      return func(pathPtr);
+    } finally {
+      calloc.free(pathPtr);
+    }
+  }
+
+  static void freeString(ffi.Pointer<Utf8> ptr) {
+    init();
+    final func = _lib!
+        .lookup<ffi.NativeFunction<FreeStringBufferC>>('free_string_buffer')
+        .asFunction<FreeStringBufferDart>();
+    func(ptr);
   }
 
   static void freeFloat(ffi.Pointer<ffi.Float> ptr) {
