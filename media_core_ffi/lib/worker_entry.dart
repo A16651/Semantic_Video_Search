@@ -86,6 +86,17 @@ void workerEntryPoint(BackgroundIngestionTask task) async {
     MediaCoreBridge.init();
     workerDebugPrint("MediaCoreBridge FFI successfully initialized.");
 
+    if (task.modelDir.isNotEmpty) {
+      workerDebugPrint("Pre-initializing native SigLIP, Tokenizer, and Whisper models from: ${task.modelDir}");
+      try {
+        MediaCoreBridge.initSiglipModel(task.modelDir);
+        MediaCoreBridge.initBpeTokenizer(task.modelDir);
+        MediaCoreBridge.initWhisperModels(task.modelDir);
+      } catch (e) {
+        workerDebugPrint("Warning: Exception during isolate model pre-initialization: $e");
+      }
+    }
+
     final int videoId = task.videoId;
     const int targetWidth = 224;
     const int targetHeight = 224;
@@ -106,7 +117,7 @@ void workerEntryPoint(BackgroundIngestionTask task) async {
       task.replyPort.send(IngestionProgress(
         videoPath: task.videoPath,
         progress: 0.08,
-        currentAction: "Decoding 1-FPS video keyframes via FFmpegKit...",
+        currentAction: "Decoding 1-FPS video keyframes via FFmpeg...",
       ));
 
       final String framePrefix = 'temp_frame_${videoId}_${DateTime.now().millisecondsSinceEpoch}_';
@@ -124,23 +135,36 @@ void workerEntryPoint(BackgroundIngestionTask task) async {
 
       workerDebugPrint("FFmpeg keyframe extraction status: $ffmpegSuccess");
 
-      // Collect extracted raw RGB files
+      // Collect extracted raw RGB files and verify size integrity
       final List<File> rgbFiles = [];
-      if (ffmpegSuccess) {
-        try {
-          final List<FileSystemEntity> entities = tempDir.listSync();
-          for (var entity in entities) {
-            if (entity is File && entity.path.contains(framePrefix) && entity.path.endsWith('.rgb')) {
+      try {
+        final List<FileSystemEntity> entities = tempDir.listSync();
+        for (var entity in entities) {
+          if (entity is File && entity.path.contains(framePrefix) && entity.path.endsWith('.rgb')) {
+            if (entity.existsSync() && entity.lengthSync() >= fullFrameSize) {
               rgbFiles.add(entity);
+            } else {
+              workerDebugPrint("Discarding invalid/0-byte RGB keyframe artifact: ${entity.path}");
+              try {
+                entity.deleteSync();
+              } catch (_) {}
             }
           }
-          rgbFiles.sort((a, b) => a.path.compareTo(b.path));
-        } catch (e) {
-          workerDebugPrint("Error scanning temp directory for RGB keyframes: $e");
         }
+        rgbFiles.sort((a, b) => a.path.compareTo(b.path));
+      } catch (e) {
+        workerDebugPrint("Error scanning temp directory for RGB keyframes: $e");
       }
 
       workerDebugPrint("Discovered ${rgbFiles.length} raw RGB keyframe files.");
+
+      if (rgbFiles.isEmpty) {
+        if (!ffmpegSuccess) {
+          throw StateError("FFmpeg keyframe extraction failed for '${task.videoPath}'. Process returned non-zero exit code or binary missing.");
+        } else {
+          workerDebugPrint("Warning: FFmpeg reported success, but zero valid RGB keyframe files (>=$fullFrameSize bytes) were discovered.");
+        }
+      }
 
       if (rgbFiles.isNotEmpty) {
         final int totalFrames = rgbFiles.length;
@@ -323,7 +347,7 @@ void workerEntryPoint(BackgroundIngestionTask task) async {
       task.replyPort.send(IngestionProgress(
         videoPath: task.videoPath,
         progress: 0.52,
-        currentAction: "Decoding audio track to raw headerless 16kHz mono PCM via FFmpegKit...",
+        currentAction: "Decoding audio track to raw headerless 16kHz mono PCM via FFmpeg...",
       ));
 
       final String tempPcmPath = '${tempDir.path}/temp_audio_${videoId}_${DateTime.now().millisecondsSinceEpoch}.pcm'.replaceAll('\\', '/');
@@ -344,19 +368,28 @@ void workerEntryPoint(BackgroundIngestionTask task) async {
       List<int> fullPcm = [];
       final File tempPcmFile = File(tempPcmPath);
 
-      if (pcmSuccess && tempPcmFile.existsSync()) {
+      if (tempPcmFile.existsSync()) {
         try {
-          final Uint8List pcmBytes = tempPcmFile.readAsBytesSync();
-          tempPcmFile.deleteSync(); // Delete temporary PCM file immediately after reading
+          final int fileSize = tempPcmFile.lengthSync();
+          if (fileSize > 0 && fileSize % 2 == 0) {
+            final Uint8List pcmBytes = tempPcmFile.readAsBytesSync();
+            final int totalSamples = pcmBytes.length ~/ 2;
+            workerDebugPrint("Loaded raw PCM buffer: ${pcmBytes.length} bytes ($totalSamples samples at 16kHz).");
 
-          final int totalSamples = pcmBytes.length ~/ 2;
-          workerDebugPrint("Loaded raw PCM buffer: ${pcmBytes.length} bytes ($totalSamples samples at 16kHz).");
-
-          final ByteData bd = ByteData.view(pcmBytes.buffer, pcmBytes.offsetInBytes, pcmBytes.length);
-          fullPcm = List<int>.generate(totalSamples, (i) => bd.getInt16(i * 2, Endian.little));
+            final ByteData bd = ByteData.view(pcmBytes.buffer, pcmBytes.offsetInBytes, pcmBytes.length);
+            fullPcm = List<int>.generate(totalSamples, (i) => bd.getInt16(i * 2, Endian.little));
+          } else {
+            workerDebugPrint("PCM output file is empty or unaligned ($fileSize bytes). Video likely has no audio track.");
+          }
         } catch (e) {
           workerDebugPrint("Error reading raw PCM audio bytes: $e");
+        } finally {
+          try {
+            tempPcmFile.deleteSync();
+          } catch (_) {}
         }
+      } else {
+        workerDebugPrint("PCM output file does not exist. Video likely has no audio track or FFmpeg extraction skipped.");
       }
 
       if (fullPcm.isNotEmpty) {
@@ -423,7 +456,7 @@ void workerEntryPoint(BackgroundIngestionTask task) async {
           }
         }
       } else {
-        workerDebugPrint("Fallback: No PCM audio decoded by FFmpeg for ${task.videoPath}");
+        workerDebugPrint("No audio track detected or 0 PCM audio decoded for ${task.videoPath}. Skipping Whisper transcription gracefully.");
       }
 
       task.replyPort.send(IngestionProgress(

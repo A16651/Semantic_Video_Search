@@ -42,6 +42,8 @@ struct OCRTextResult {
 EXPORT bool compute_sad_threshold(const uint8_t* frame_a, const uint8_t* frame_b, uint32_t width, uint32_t height, float threshold_percentage);
 
 // 2. ONNX SigLIP Text-Encoding Pipeline (Enforced to exactly 512 dimensions)
+EXPORT bool init_siglip_model(const char* model_dir);
+EXPORT bool init_bpe_tokenizer(const char* model_dir);
 EXPORT float* encode_text_query(const char* query, int32_t* out_dimension);
 
 // 3. ONNX SigLIP Image Projection (Asserts & Down-projects high-dim to 512 dimensions)

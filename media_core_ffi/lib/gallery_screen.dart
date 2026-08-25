@@ -160,9 +160,17 @@ class _ModelLoaderScreenState extends State<ModelLoaderScreen> {
         }
       }
 
-      // Store the resolved model directory globally for worker isolate path resolution
+      // Store the resolved model directory globally for worker isolate path resolution & initialize main UI isolate models
       if (foundModelDir.isNotEmpty) {
         _resolvedModelDir = foundModelDir;
+        try {
+          MediaCoreBridge.init();
+          MediaCoreBridge.initSiglipModel(_resolvedModelDir);
+          MediaCoreBridge.initBpeTokenizer(_resolvedModelDir);
+          MediaCoreBridge.initWhisperModels(_resolvedModelDir);
+        } catch (e) {
+          debugPrint("[UI Orchestrator] Warning initializing MediaCoreBridge on UI thread: $e");
+        }
       }
 
       _calculateTotalProgress();
@@ -338,6 +346,16 @@ class _ModelLoaderScreenState extends State<ModelLoaderScreen> {
       }
 
       client.close();
+
+      _resolvedModelDir = appDir.path;
+      try {
+        MediaCoreBridge.init();
+        MediaCoreBridge.initSiglipModel(_resolvedModelDir);
+        MediaCoreBridge.initBpeTokenizer(_resolvedModelDir);
+        MediaCoreBridge.initWhisperModels(_resolvedModelDir);
+      } catch (e) {
+        debugPrint("[UI Orchestrator] Warning initializing MediaCoreBridge after download: $e");
+      }
 
       setState(() {
         _completed = true;
@@ -564,6 +582,10 @@ class _GalleryDashboardScreenState extends State<GalleryDashboardScreen> {
 
   List<double> _computePhotoEmbedding(String filename) {
     try {
+      if (_resolvedModelDir.isNotEmpty) {
+        MediaCoreBridge.initSiglipModel(_resolvedModelDir);
+        MediaCoreBridge.initBpeTokenizer(_resolvedModelDir);
+      }
       debugPrint("[UI Orchestrator] Generating 512D SigLIP embedding for photo '$filename'...");
       return MediaCoreBridge.encodeText(filename);
     } catch (e) {
@@ -814,8 +836,13 @@ class _GalleryDashboardScreenState extends State<GalleryDashboardScreen> {
     // Trigger local FFI to encode natural query text into 512 dimensions
     List<double> queryVector;
     try {
+      if (_resolvedModelDir.isNotEmpty) {
+        MediaCoreBridge.initSiglipModel(_resolvedModelDir);
+        MediaCoreBridge.initBpeTokenizer(_resolvedModelDir);
+      }
       queryVector = MediaCoreBridge.encodeText(query);
     } catch (e) {
+      debugPrint("[UI Orchestrator] Text query encoding fallback: $e");
       // Gracefully catch missing .onnx FFI runtime loader exceptions and fall back
       final rand = Random(query.hashCode);
       queryVector =
@@ -2542,6 +2569,10 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
         return t.textEmbedding512;
       }
       try {
+        if (_resolvedModelDir.isNotEmpty) {
+          MediaCoreBridge.initSiglipModel(_resolvedModelDir);
+          MediaCoreBridge.initBpeTokenizer(_resolvedModelDir);
+        }
         return MediaCoreBridge.encodeText(t.sentence);
       } catch (_) {
         return List<double>.generate(512, (_) => 0.0);

@@ -167,6 +167,12 @@ typedef NormalizeRgb24HwcToChwDart = ffi.Pointer<ffi.Float> Function(
   int targetH,
 );
 
+typedef InitSiglipModelC = ffi.Bool Function(ffi.Pointer<Utf8> modelDir);
+typedef InitSiglipModelDart = bool Function(ffi.Pointer<Utf8> modelDir);
+
+typedef InitBpeTokenizerC = ffi.Bool Function(ffi.Pointer<Utf8> modelDir);
+typedef InitBpeTokenizerDart = bool Function(ffi.Pointer<Utf8> modelDir);
+
 typedef InitWhisperModelsC = ffi.Bool Function(ffi.Pointer<Utf8> modelDir);
 typedef InitWhisperModelsDart = bool Function(ffi.Pointer<Utf8> modelDir);
 
@@ -541,6 +547,32 @@ class MediaCoreBridge {
         .lookup<ffi.NativeFunction<NormalizeRgb24HwcToChwC>>('normalize_rgb24_hwc_to_chw')
         .asFunction<NormalizeRgb24HwcToChwDart>();
     return func(rgbData, width, height, targetW, targetH);
+  }
+
+  static bool initSiglipModel(String modelDir) {
+    init();
+    final func = _lib!
+        .lookup<ffi.NativeFunction<InitSiglipModelC>>('init_siglip_model')
+        .asFunction<InitSiglipModelDart>();
+    final pathPtr = modelDir.toNativeUtf8();
+    try {
+      return func(pathPtr);
+    } finally {
+      calloc.free(pathPtr);
+    }
+  }
+
+  static bool initBpeTokenizer(String modelDir) {
+    init();
+    final func = _lib!
+        .lookup<ffi.NativeFunction<InitBpeTokenizerC>>('init_bpe_tokenizer')
+        .asFunction<InitBpeTokenizerDart>();
+    final pathPtr = modelDir.toNativeUtf8();
+    try {
+      return func(pathPtr);
+    } finally {
+      calloc.free(pathPtr);
+    }
   }
 
   static bool initWhisperModels(String modelDir) {
