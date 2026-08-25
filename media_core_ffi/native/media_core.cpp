@@ -95,25 +95,43 @@ static void normalize_and_project_to_512(const float* input, size_t input_size, 
     }
 }
 
+static std::string g_cached_siglip_dir = "";
+
 #ifdef HAS_ONNXRUNTIME
 static std::mutex g_siglip_session_mutex;
 static std::unique_ptr<Ort::Session> g_siglip_session = nullptr;
 
-static bool init_siglip_model() {
+bool init_siglip_model(const char* model_dir) {
     std::lock_guard<std::mutex> lock(g_siglip_session_mutex);
-    if (g_siglip_session) return true;
 
-    std::cout << "[Native MediaCore] Initializing SigLIP ONNX session..." << std::endl;
+    std::string base_dir = (model_dir && std::strlen(model_dir) > 0)
+        ? model_dir
+        : (g_cached_siglip_dir.empty() ? "local_models" : g_cached_siglip_dir);
+
+    if (g_siglip_session && g_cached_siglip_dir == base_dir) return true;
+
+    std::cout << "[Native MediaCore] Initializing SigLIP ONNX session from: " << base_dir << std::endl;
     std::fflush(stdout);
 
     try {
-        const char* model_paths[] = { "local_models/siglip.onnx", "siglip.onnx", "../local_models/siglip.onnx" };
+        std::string target_path = base_dir + "/siglip.onnx";
         std::string selected_path = "";
-        for (const char* path : model_paths) {
-            std::ifstream f(path);
+
+        {
+            std::ifstream f(target_path);
             if (f.good()) {
-                selected_path = path;
-                break;
+                selected_path = target_path;
+            }
+        }
+
+        if (selected_path.empty()) {
+            const char* model_paths[] = { "local_models/siglip.onnx", "siglip.onnx", "../local_models/siglip.onnx" };
+            for (const char* path : model_paths) {
+                std::ifstream f(path);
+                if (f.good()) {
+                    selected_path = path;
+                    break;
+                }
             }
         }
 
@@ -129,19 +147,30 @@ static bool init_siglip_model() {
 #else
             g_siglip_session = std::make_unique<Ort::Session>(get_ort_env(), selected_path.c_str(), session_options);
 #endif
+            g_cached_siglip_dir = base_dir;
             std::cout << "[Native MediaCore] SigLIP session successfully loaded from path: " << selected_path << std::endl;
             std::fflush(stdout);
             return true;
         } else {
-            std::cout << "[Native MediaCore] Warning: SigLIP model file not found in search paths." << std::endl;
+            std::cout << "[Native MediaCore] Warning: SigLIP model file not found in " << base_dir << " or search paths." << std::endl;
             std::fflush(stdout);
         }
+    } catch (const Ort::Exception& oe) {
+        std::cerr << "[Native MediaCore CRITICAL] ONNX Runtime Error (" << oe.GetOrtErrorCode() << ") initializing SigLIP: " << oe.what() << std::endl;
+        std::fflush(stderr);
     } catch (const std::exception& e) {
-        std::cout << "[Native MediaCore] Error initializing SigLIP ONNX model: " << e.what() << std::endl;
-        std::fflush(stdout);
+        std::cerr << "[Native MediaCore CRITICAL] Error initializing SigLIP ONNX model: " << e.what() << std::endl;
+        std::fflush(stderr);
     } catch (...) {
-        std::cout << "[Native MediaCore] Unknown exception initializing SigLIP ONNX model." << std::endl;
-        std::fflush(stdout);
+        std::cerr << "[Native MediaCore CRITICAL] Fatal Unknown Exception initializing SigLIP ONNX model." << std::endl;
+        std::fflush(stderr);
+    }
+    return false;
+}
+#else
+bool init_siglip_model(const char* model_dir) {
+    if (model_dir && std::strlen(model_dir) > 0) {
+        g_cached_siglip_dir = model_dir;
     }
     return false;
 }
@@ -149,12 +178,17 @@ static bool init_siglip_model() {
 
 static std::mutex g_bpe_tokenizer_mutex;
 static std::unordered_map<std::string, int64_t> g_bpe_vocab;
+static std::string g_cached_bpe_dir = "";
 
-static void init_bpe_tokenizer(const char* model_dir) {
+bool init_bpe_tokenizer(const char* model_dir) {
     std::lock_guard<std::mutex> lock(g_bpe_tokenizer_mutex);
-    if (!g_bpe_vocab.empty()) return;
 
-    std::string base_dir = (model_dir && std::strlen(model_dir) > 0) ? model_dir : "local_models";
+    std::string base_dir = (model_dir && std::strlen(model_dir) > 0)
+        ? model_dir
+        : (!g_cached_siglip_dir.empty() ? g_cached_siglip_dir : (g_cached_bpe_dir.empty() ? "local_models" : g_cached_bpe_dir));
+
+    if (!g_bpe_vocab.empty() && g_cached_bpe_dir == base_dir) return true;
+
     std::string token_path = base_dir + "/tokenizer.json";
 
     std::ifstream f(token_path);
@@ -175,12 +209,27 @@ static void init_bpe_tokenizer(const char* model_dir) {
             nlohmann::json j;
             file >> j;
             if (j.contains("model") && j["model"].contains("vocab")) {
+                g_bpe_vocab.clear();
                 for (auto& el : j["model"]["vocab"].items()) {
                     g_bpe_vocab[el.key()] = el.value().get<int64_t>();
                 }
+                g_cached_bpe_dir = base_dir;
+                std::cout << "[Native MediaCore] BPE Tokenizer successfully loaded from path: " << token_path << " (" << g_bpe_vocab.size() << " vocab entries)" << std::endl;
+                std::fflush(stdout);
+                return true;
             }
+        } else {
+            std::cout << "[Native MediaCore] Warning: tokenizer.json not found in " << token_path << std::endl;
+            std::fflush(stdout);
         }
-    } catch (...) {}
+    } catch (const std::exception& e) {
+        std::cerr << "[Native MediaCore CRITICAL] Exception loading tokenizer.json: " << e.what() << std::endl;
+        std::fflush(stderr);
+    } catch (...) {
+        std::cerr << "[Native MediaCore CRITICAL] Unknown exception loading tokenizer.json" << std::endl;
+        std::fflush(stderr);
+    }
+    return false;
 }
 
 static std::vector<int64_t> bpe_tokenize_query(const char* query, const char* model_dir) {
@@ -254,7 +303,7 @@ float* encode_text_query(const char* query, int32_t* out_dimension) {
     bool inference_success = false;
 
 #ifdef HAS_ONNXRUNTIME
-    if (init_siglip_model() && g_siglip_session) {
+    if (init_siglip_model(nullptr) && g_siglip_session) {
         try {
             std::vector<int64_t> tokens = bpe_tokenize_query(query, nullptr);
 
@@ -280,7 +329,17 @@ float* encode_text_query(const char* query, int32_t* out_dimension) {
                 normalize_and_project_to_512(tensor_data, total_elements, vector);
                 inference_success = true;
             }
+        } catch (const Ort::Exception& oe) {
+            std::cerr << "[Native MediaCore CRITICAL] ONNX Runtime Error (" << oe.GetOrtErrorCode() << ") in encode_text_query: " << oe.what() << std::endl;
+            std::fflush(stderr);
+            inference_success = false;
+        } catch (const std::exception& e) {
+            std::cerr << "[Native MediaCore CRITICAL] Standard Exception in encode_text_query: " << e.what() << std::endl;
+            std::fflush(stderr);
+            inference_success = false;
         } catch (...) {
+            std::cerr << "[Native MediaCore CRITICAL] Fatal Unknown Exception in encode_text_query!" << std::endl;
+            std::fflush(stderr);
             inference_success = false;
         }
     }
@@ -327,7 +386,7 @@ float* encode_image_frame(const float* chw_data, int32_t* out_dimension) {
     bool inference_success = false;
 
 #ifdef HAS_ONNXRUNTIME
-    if (init_siglip_model() && g_siglip_session) {
+    if (init_siglip_model(nullptr) && g_siglip_session) {
         try {
             int64_t image_shape[] = { 1, 3, 224, 224 };
             size_t num_pixels = 3 * 224 * 224;
@@ -355,13 +414,17 @@ float* encode_image_frame(const float* chw_data, int32_t* out_dimension) {
                 std::cout << "[Native MediaCore] SigLIP image frame inference complete. Projected to 512D vector." << std::endl;
                 std::fflush(stdout);
             }
+        } catch (const Ort::Exception& oe) {
+            std::cerr << "[Native MediaCore CRITICAL] ONNX Runtime Error (" << oe.GetOrtErrorCode() << ") in encode_image_frame: " << oe.what() << std::endl;
+            std::fflush(stderr);
+            inference_success = false;
         } catch (const std::exception& e) {
-            std::cout << "[Native MediaCore] Exception inside encode_image_frame: " << e.what() << std::endl;
-            std::fflush(stdout);
+            std::cerr << "[Native MediaCore CRITICAL] Standard Exception in encode_image_frame: " << e.what() << std::endl;
+            std::fflush(stderr);
             inference_success = false;
         } catch (...) {
-            std::cout << "[Native MediaCore] Unknown exception inside encode_image_frame." << std::endl;
-            std::fflush(stdout);
+            std::cerr << "[Native MediaCore CRITICAL] Fatal Unknown Exception in encode_image_frame!" << std::endl;
+            std::fflush(stderr);
             inference_success = false;
         }
     }
@@ -565,12 +628,15 @@ bool init_whisper_models(const char* model_dir) {
             std::cout << "[Native MediaCore] Warning: Whisper encoder or decoder model file missing in " << base_dir << std::endl;
             std::fflush(stdout);
         }
+    } catch (const Ort::Exception& oe) {
+        std::cerr << "[Native MediaCore CRITICAL] ONNX Runtime Error (" << oe.GetOrtErrorCode() << ") initializing Whisper: " << oe.what() << std::endl;
+        std::fflush(stderr);
     } catch (const std::exception& e) {
-        std::cout << "[Native MediaCore] Error initializing Whisper ONNX models: " << e.what() << std::endl;
-        std::fflush(stdout);
+        std::cerr << "[Native MediaCore CRITICAL] Error initializing Whisper ONNX models: " << e.what() << std::endl;
+        std::fflush(stderr);
     } catch (...) {
-        std::cout << "[Native MediaCore] Unknown exception initializing Whisper ONNX models." << std::endl;
-        std::fflush(stdout);
+        std::cerr << "[Native MediaCore CRITICAL] Unknown exception initializing Whisper ONNX models." << std::endl;
+        std::fflush(stderr);
     }
 #endif
     return false;
@@ -704,12 +770,15 @@ char* whisper_transcribe_audio(const float* mel_data, int32_t mel_bins, const ch
                 std::cout << "[Native MediaCore] Whisper Decoder loop finished. Sequence length: " << token_sequence.size() << std::endl;
                 std::fflush(stdout);
             }
+        } catch (const Ort::Exception& oe) {
+            std::cerr << "[Native MediaCore CRITICAL] ONNX Runtime Error (" << oe.GetOrtErrorCode() << ") in Whisper transcription: " << oe.what() << std::endl;
+            std::fflush(stderr);
         } catch (const std::exception& e) {
-            std::cout << "[Native MediaCore] Whisper transcription exception: " << e.what() << std::endl;
-            std::fflush(stdout);
+            std::cerr << "[Native MediaCore CRITICAL] Standard Exception in Whisper transcription: " << e.what() << std::endl;
+            std::fflush(stderr);
         } catch (...) {
-            std::cout << "[Native MediaCore] Unknown exception during Whisper transcription." << std::endl;
-            std::fflush(stdout);
+            std::cerr << "[Native MediaCore CRITICAL] Unknown exception during Whisper transcription." << std::endl;
+            std::fflush(stderr);
         }
     }
 #endif
@@ -1015,12 +1084,15 @@ static bool init_ocr_models(const char* model_dir) {
             std::cout << "[Native MediaCore] Warning: PP-OCR model files missing in " << base_dir << std::endl;
             std::fflush(stdout);
         }
+    } catch (const Ort::Exception& oe) {
+        std::cerr << "[Native MediaCore CRITICAL] ONNX Runtime Error (" << oe.GetOrtErrorCode() << ") initializing PP-OCR: " << oe.what() << std::endl;
+        std::fflush(stderr);
     } catch (const std::exception& e) {
-        std::cout << "[Native MediaCore] Error initializing PP-OCR ONNX models: " << e.what() << std::endl;
-        std::fflush(stdout);
+        std::cerr << "[Native MediaCore CRITICAL] Error initializing PP-OCR ONNX models: " << e.what() << std::endl;
+        std::fflush(stderr);
     } catch (...) {
-        std::cout << "[Native MediaCore] Unknown exception initializing PP-OCR ONNX models." << std::endl;
-        std::fflush(stdout);
+        std::cerr << "[Native MediaCore CRITICAL] Unknown exception initializing PP-OCR ONNX models." << std::endl;
+        std::fflush(stderr);
     }
     return false;
 }
@@ -1207,11 +1279,27 @@ OCRTextResult* run_pp_ocr(const uint8_t* rgb_data, uint32_t width, uint32_t heig
                                 detected_results.push_back(res);
                             }
                         }
+                    } catch (const Ort::Exception& oe) {
+                        std::cerr << "[Native MediaCore CRITICAL] ONNX Runtime Error (" << oe.GetOrtErrorCode() << ") in PP-OCR Rec: " << oe.what() << std::endl;
+                        std::fflush(stderr);
+                    } catch (const std::exception& e) {
+                        std::cerr << "[Native MediaCore CRITICAL] Standard Exception in PP-OCR Rec: " << e.what() << std::endl;
+                        std::fflush(stderr);
                     } catch (...) {
+                        std::cerr << "[Native MediaCore CRITICAL] Unknown exception in PP-OCR Rec." << std::endl;
+                        std::fflush(stderr);
                     }
                 }
             }
+        } catch (const Ort::Exception& oe) {
+            std::cerr << "[Native MediaCore CRITICAL] ONNX Runtime Error (" << oe.GetOrtErrorCode() << ") in PP-OCR Det: " << oe.what() << std::endl;
+            std::fflush(stderr);
+        } catch (const std::exception& e) {
+            std::cerr << "[Native MediaCore CRITICAL] Standard Exception in PP-OCR Det: " << e.what() << std::endl;
+            std::fflush(stderr);
         } catch (...) {
+            std::cerr << "[Native MediaCore CRITICAL] Unknown exception in PP-OCR Det." << std::endl;
+            std::fflush(stderr);
         }
     }
 #endif
